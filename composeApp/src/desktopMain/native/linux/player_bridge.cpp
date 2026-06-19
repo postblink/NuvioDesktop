@@ -551,6 +551,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     jboolean playWhenReady,
     jlong initialPositionMs,
     jstring controlsPageUrl,
+    jint decoderPriority,
     jobject eventSink) {
 
     const std::string url = jstringToUtf8(env, sourceUrl);
@@ -594,7 +595,19 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     mpv_set_option_string(mpv, "input-default-bindings", "no");
     mpv_set_option_string(mpv, "input-vo-keyboard", "no");
     mpv_set_option_string(mpv, "keep-open", "yes");
-    mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // Hardware decode preference, matching the Windows/macOS bridges.
+    // decoderPriority: 0 = hardware-strict (no software fallback),
+    // 2 = CPU/software (hwdec off), else (1) = auto with software fallback.
+    mpv_set_option_string(mpv, "hwdec", "auto");
+    mpv_set_option_string(mpv, "hwdec-codecs", "all");
+    if (decoderPriority == 0) {
+        mpv_set_option_string(mpv, "vd-lavc-software-fallback", "no");
+    } else if (decoderPriority == 2) {
+        mpv_set_option_string(mpv, "hwdec", "no");
+        mpv_set_option_string(mpv, "vd-lavc-software-fallback", "yes");
+    } else {
+        mpv_set_option_string(mpv, "vd-lavc-software-fallback", "yes");
+    }
     mpv_set_option_string(mpv, "force-window", "no");
     if (player->renderMode) {
         // Render API: mpv renders into our GtkGLArea's GL context (no own window).
