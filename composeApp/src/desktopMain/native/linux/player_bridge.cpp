@@ -22,10 +22,18 @@
 #include <jni.h>
 #include <mpv/client.h>
 
+#include <gtk/gtk.h>
+#include <gdk/gdkx.h>
+#include <webkit2/webkit2.h>
+#include <X11/Xlib.h>
+
 #include <atomic>
 #include <clocale>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -38,9 +46,16 @@ namespace {
 struct PlayerInstance {
     mpv_handle *mpv = nullptr;
     JavaVM *jvm = nullptr;
-    jobject eventSink = nullptr; // global ref; reserved for Phase 4 overlay events
+    jobject eventSink = nullptr;      // global ref; receives overlay control events
+    jmethodID onEventMethod = nullptr; // NativePlayerEventSink.onPlayerEvent(String,double)
     std::thread eventThread;
     std::atomic<bool> running{false};
+
+    // WebKitGTK controls overlay (created/destroyed on the GTK thread).
+    unsigned long hostWid = 0;   // host AWT Canvas X11 window we overlay into
+    std::string controlsUrl;     // file:// URL of the HTML controls page
+    GtkWidget *gtkWindow = nullptr;
+    WebKitWebView *webView = nullptr;
 };
 
 // Guards PlayerInstance *lifetime*. The app polls state (positionMs, isPaused,
@@ -121,6 +136,243 @@ void command(mpv_handle *mpv, std::vector<const char *> args) {
     }
 }
 
+// ---- WebKitGTK controls overlay ------------------------------------------
+// The HTML controls (composeApp/.../resources/player-ui/controls.*) already speak
+// the WebKit message API (window.webkit.messageHandlers.player + window.playerUpdate),
+// shared with the macOS WKWebView path, so the JS is reused unchanged. Here we host
+// a transparent WebKitWebView reparented over the mpv video window, push state via
+// evaluate_javascript, and forward web messages to the Kotlin event sink.
+//
+// All GTK/WebKit calls must run on the GTK thread; use runOnGtk() to marshal.
+
+std::once_flag g_gtkOnce;
+
+void ensureGtkThread() {
+    std::call_once(g_gtkOnce, []() {
+        std::thread([]() {
+            gtk_init(nullptr, nullptr);
+            gtk_main();
+        }).detach();
+    });
+}
+
+struct GtkTask {
+    std::function<void()> fn;
+};
+
+gboolean gtkTaskTrampoline(gpointer data) {
+    auto *task = static_cast<GtkTask *>(data);
+    task->fn();
+    delete task;
+    return G_SOURCE_REMOVE;
+}
+
+void runOnGtk(std::function<void()> fn) {
+    ensureGtkThread();
+    // g_idle_add (not g_main_context_invoke): the latter runs the callback inline
+    // on the calling thread if it can acquire the default context, which races the
+    // GTK thread's gtk_init and would run GTK code on the AWT thread (crash). An
+    // idle source always runs on the thread iterating the context (our gtk_main).
+    g_idle_add_full(G_PRIORITY_DEFAULT, gtkTaskTrampoline, new GtkTask{std::move(fn)}, nullptr);
+}
+
+// Calls NativePlayerEventSink.onPlayerEvent(type, value). Runs on the GTK thread,
+// which is attached to the JVM on first use and left attached (daemon thread).
+void dispatchEvent(PlayerInstance *player, const char *type, double value) {
+    if (player->eventSink == nullptr || player->onEventMethod == nullptr || player->jvm == nullptr) {
+        return;
+    }
+    JNIEnv *env = nullptr;
+    jint rc = player->jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (rc == JNI_EDETACHED) {
+        if (player->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr) != JNI_OK) {
+            return;
+        }
+    } else if (rc != JNI_OK) {
+        return;
+    }
+    jstring jtype = env->NewStringUTF(type);
+    env->CallVoidMethod(player->eventSink, player->onEventMethod, jtype, value);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(jtype);
+}
+
+// window.webkit.messageHandlers.player.postMessage({type, value})
+void onScriptMessage(WebKitUserContentManager *, WebKitJavascriptResult *result, gpointer userData) {
+    auto *player = static_cast<PlayerInstance *>(userData);
+    JSCValue *message = webkit_javascript_result_get_js_value(result);
+    if (message == nullptr || !jsc_value_is_object(message)) {
+        return;
+    }
+    JSCValue *typeVal = jsc_value_object_get_property(message, "type");
+    JSCValue *valueVal = jsc_value_object_get_property(message, "value");
+    char *typeStr = (typeVal != nullptr && jsc_value_is_string(typeVal)) ? jsc_value_to_string(typeVal) : nullptr;
+    double value = (valueVal != nullptr && jsc_value_is_number(valueVal)) ? jsc_value_to_double(valueVal) : 0.0;
+    if (typeStr != nullptr) {
+        dispatchEvent(player, typeStr, value);
+        g_free(typeStr);
+    }
+    if (typeVal != nullptr) g_object_unref(typeVal);
+    if (valueVal != nullptr) g_object_unref(valueVal);
+}
+
+// Runs on the GTK thread (caller holds g_mutex and has verified the player is live).
+void createOverlayOnGtk(PlayerInstance *player) {
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    gtk_widget_set_app_paintable(window, TRUE);
+    GdkScreen *screen = gtk_widget_get_screen(window);
+    GdkVisual *rgba = gdk_screen_get_rgba_visual(screen);
+    if (rgba != nullptr) {
+        gtk_widget_set_visual(window, rgba);
+    }
+
+    WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+    webkit_user_content_manager_register_script_message_handler(ucm, "player");
+    g_signal_connect(ucm, "script-message-received::player", G_CALLBACK(onScriptMessage), player);
+
+    WebKitWebView *web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
+    GdkRGBA transparent = {0.0, 0.0, 0.0, 0.0};
+    webkit_web_view_set_background_color(web, &transparent);
+    gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(web));
+
+    player->gtkWindow = window;
+    player->webView = web;
+
+    gtk_widget_realize(window);
+    gtk_widget_show_all(window);
+
+    GdkWindow *gdkWindow = gtk_widget_get_window(window);
+    Window overlayXid = GDK_WINDOW_XID(gdkWindow);
+    Display *display = GDK_WINDOW_XDISPLAY(gdkWindow);
+
+    XReparentWindow(display, overlayXid, player->hostWid, 0, 0);
+    XWindowAttributes attrs;
+    if (XGetWindowAttributes(display, player->hostWid, &attrs) != 0) {
+        gtk_window_resize(GTK_WINDOW(window), attrs.width, attrs.height);
+        XResizeWindow(display, overlayXid, attrs.width, attrs.height);
+    }
+    XMapWindow(display, overlayXid);
+    XRaiseWindow(display, overlayXid);
+    XFlush(display);
+
+    webkit_web_view_load_uri(web, player->controlsUrl.c_str());
+    std::fprintf(stderr, "[nuvio-player] overlay created over host wid=%lu (rgba_visual=%d)\n",
+                 player->hostWid, rgba != nullptr ? 1 : 0);
+}
+
+// ---- track-list (audio/subtitle) JSON ------------------------------------
+// Produces the JSON shape NativePlayerController deserializes (NativeMpvTrack):
+//   [{"index":0,"id":"1","label":"...","language":"eng","selected":true,"forced":false}, ...]
+
+std::string jsonEscape(const std::string &value) {
+    std::string out;
+    out.reserve(value.size() + 2);
+    for (char ch : value) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(ch));
+                    out += buf;
+                } else {
+                    out += ch;
+                }
+        }
+    }
+    return out;
+}
+
+const mpv_node *nodeMapGet(const mpv_node *map, const char *key) {
+    if (map == nullptr || map->format != MPV_FORMAT_NODE_MAP) {
+        return nullptr;
+    }
+    const mpv_node_list *list = map->u.list;
+    for (int i = 0; i < list->num; ++i) {
+        if (list->keys[i] != nullptr && std::strcmp(list->keys[i], key) == 0) {
+            return &list->values[i];
+        }
+    }
+    return nullptr;
+}
+
+std::string nodeString(const mpv_node *node) {
+    if (node != nullptr && node->format == MPV_FORMAT_STRING && node->u.string != nullptr) {
+        return node->u.string;
+    }
+    return std::string();
+}
+
+int64_t nodeInt(const mpv_node *node) {
+    if (node == nullptr) return 0;
+    if (node->format == MPV_FORMAT_INT64) return node->u.int64;
+    if (node->format == MPV_FORMAT_FLAG) return node->u.flag;
+    return 0;
+}
+
+bool nodeFlag(const mpv_node *node) {
+    if (node == nullptr) return false;
+    if (node->format == MPV_FORMAT_FLAG) return node->u.flag != 0;
+    if (node->format == MPV_FORMAT_INT64) return node->u.int64 != 0;
+    return false;
+}
+
+// wantType is mpv's track type: "audio" or "sub".
+std::string buildTracksJson(mpv_handle *mpv, const char *wantType) {
+    std::string out = "[";
+    if (mpv == nullptr) {
+        out += "]";
+        return out;
+    }
+    mpv_node node;
+    if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) >= 0) {
+        if (node.format == MPV_FORMAT_NODE_ARRAY) {
+            const mpv_node_list *tracks = node.u.list;
+            int ordinal = 0;
+            for (int i = 0; i < tracks->num; ++i) {
+                const mpv_node *track = &tracks->values[i];
+                if (track->format != MPV_FORMAT_NODE_MAP) continue;
+                if (nodeString(nodeMapGet(track, "type")) != wantType) continue;
+
+                const int64_t id = nodeInt(nodeMapGet(track, "id"));
+                const std::string title = nodeString(nodeMapGet(track, "title"));
+                const std::string lang = nodeString(nodeMapGet(track, "lang"));
+                const bool selected = nodeFlag(nodeMapGet(track, "selected"));
+                const bool forced = nodeFlag(nodeMapGet(track, "forced"));
+
+                char buf[64];
+                if (ordinal > 0) out += ",";
+                out += "{\"index\":";
+                std::snprintf(buf, sizeof(buf), "%d", ordinal);
+                out += buf;
+                out += ",\"id\":\"";
+                std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(id));
+                out += buf;
+                out += "\",\"label\":\"";
+                out += jsonEscape(title);
+                out += "\",\"language\":\"";
+                out += jsonEscape(lang);
+                out += "\",\"selected\":";
+                out += selected ? "true" : "false";
+                out += ",\"forced\":";
+                out += forced ? "true" : "false";
+                out += "}";
+                ++ordinal;
+            }
+        }
+        mpv_free_node_contents(&node);
+    }
+    out += "]";
+    return out;
+}
+
 // Drains the mpv event queue so the core stays responsive. Phase 4 will route
 // selected events (and overlay messages) back to Kotlin via eventSink here.
 void runEventLoop(PlayerInstance *player) {
@@ -168,7 +420,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     jobjectArray headerLines,
     jboolean playWhenReady,
     jlong initialPositionMs,
-    jstring /* controlsPageUrl */,
+    jstring controlsPageUrl,
     jobject eventSink) {
 
     const std::string url = jstringToUtf8(env, sourceUrl);
@@ -184,8 +436,13 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
 
     auto *player = new PlayerInstance();
     env->GetJavaVM(&player->jvm);
+    player->hostWid = static_cast<unsigned long>(hostViewPtr);
+    player->controlsUrl = jstringToUtf8(env, controlsPageUrl);
     if (eventSink != nullptr) {
         player->eventSink = env->NewGlobalRef(eventSink);
+        jclass sinkClass = env->GetObjectClass(eventSink);
+        player->onEventMethod = env->GetMethodID(sinkClass, "onPlayerEvent", "(Ljava/lang/String;D)V");
+        env->DeleteLocalRef(sinkClass);
     }
 
     player->mpv = mpv_create();
@@ -279,6 +536,25 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
         std::lock_guard<std::mutex> lock(g_mutex);
         g_live.insert(player);
     }
+
+    // Build the controls overlay on the GTK thread. Re-check liveness there in
+    // case dispose() raced ahead before the task ran.
+    //
+    // DISABLED BY DEFAULT: reparenting a WebKitGTK child window alongside mpv's
+    // GLX child in the AWT window causes X11 conflicts (RenderBadPicture /
+    // BadWindow), corrupts mpv rendering, and doesn't composite. Needs a
+    // different architecture (out-of-process webview, or mpv render-API into a
+    // GTK GLArea with GtkOverlay). Opt in with NUVIO_LINUX_OVERLAY=1 to iterate.
+    static const bool overlayEnabled = std::getenv("NUVIO_LINUX_OVERLAY") != nullptr;
+    if (overlayEnabled && !player->controlsUrl.empty()) {
+        runOnGtk([player]() {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_live.count(player) != 0) {
+                createOverlayOnGtk(player);
+            }
+        });
+    }
+
     return reinterpret_cast<jlong>(player);
 }
 
@@ -292,6 +568,16 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *en
     // Deregister first so any concurrent query/transport call (blocked on
     // g_mutex) sees it gone and returns instead of touching freed state.
     g_live.erase(player);
+
+    // Destroy the overlay on the GTK thread, capturing the widget by value so it
+    // is safe even after this instance is freed below.
+    GtkWidget *overlay = player->gtkWindow;
+    player->gtkWindow = nullptr;
+    player->webView = nullptr;
+    if (overlay != nullptr) {
+        runOnGtk([overlay]() { gtk_widget_destroy(overlay); });
+    }
+
     player->running.store(false);
     if (player->mpv != nullptr) {
         mpv_wakeup(player->mpv);
@@ -445,16 +731,26 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_speed(JNIEnv *, jo
     return static_cast<jfloat>(getDouble(player->mpv, "speed", 1.0));
 }
 
-// ---- Track enumeration (Phase 4): return empty lists for now --------------
+// ---- Track enumeration ----------------------------------------------------
 
 JNIEXPORT jstring JNICALL
-Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_audioTracksJson(JNIEnv *env, jobject, jlong) {
-    return env->NewStringUTF("[]");
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_audioTracksJson(JNIEnv *env, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    if (player == nullptr) {
+        return env->NewStringUTF("[]");
+    }
+    return env->NewStringUTF(buildTracksJson(player->mpv, "audio").c_str());
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_subtitleTracksJson(JNIEnv *env, jobject, jlong) {
-    return env->NewStringUTF("[]");
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_subtitleTracksJson(JNIEnv *env, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    if (player == nullptr) {
+        return env->NewStringUTF("[]");
+    }
+    return env->NewStringUTF(buildTracksJson(player->mpv, "sub").c_str());
 }
 
 JNIEXPORT void JNICALL
@@ -558,8 +854,24 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_applySubtitleStyle
 // ---- Controls overlay + window chrome: Phase 4/5 (stubs) ------------------
 
 JNIEXPORT void JNICALL
-Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_updateControls(JNIEnv *, jobject, jlong, jstring) {
-    // No-op until the WebKitGTK overlay lands (Phase 4).
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_updateControls(JNIEnv *env, jobject, jlong handle, jstring controlsJson) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        PlayerInstance *player = liveLocked(handle);
+        if (player == nullptr || player->webView == nullptr) {
+            return;
+        }
+    }
+    auto *player = reinterpret_cast<PlayerInstance *>(handle);
+    const std::string script = "window.playerUpdate(" + jstringToUtf8(env, controlsJson) + ");";
+    runOnGtk([player, script]() {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_live.count(player) == 0 || player->webView == nullptr) {
+            return;
+        }
+        webkit_web_view_evaluate_javascript(player->webView, script.c_str(), -1,
+                                            nullptr, nullptr, nullptr, nullptr, nullptr);
+    });
 }
 
 JNIEXPORT void JNICALL

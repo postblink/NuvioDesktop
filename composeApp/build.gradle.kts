@@ -602,19 +602,22 @@ val linuxPlayerBridgeCommand = listOf(
     "-c",
     """
     set -eu
-    if ! pkg-config --exists mpv; then
-      echo 'Linux player bridge: libmpv dev files not found via pkg-config (install mpv/libmpv).' >&2
-      exit 1
-    fi
+    PKGS='mpv gtk+-3.0 webkit2gtk-4.1'
+    for pkg in ${'$'}PKGS; do
+      if ! pkg-config --exists "${'$'}pkg"; then
+        echo "Linux player bridge: missing dev package '${'$'}pkg' (pkg-config). Install it (e.g. mpv, gtk3, webkit2gtk-4.1)." >&2
+        exit 1
+      fi
+    done
     exec ${shellQuote(linuxPlayerBridgeCompiler)} \
       -std=c++17 -fPIC -shared -O2 -pthread \
       ${shellQuote(linuxPlayerBridgeSourceFile.absolutePath)} \
       -o ${shellQuote(linuxPlayerBridgeOutputFile.absolutePath)} \
       -I${shellQuote("$linuxPlayerBridgeJavaHome/include")} \
       -I${shellQuote("$linuxPlayerBridgeJavaHome/include/linux")} \
-      ${'$'}(pkg-config --cflags mpv) \
+      ${'$'}(pkg-config --cflags ${'$'}PKGS) \
       -Wl,-rpath,'${'$'}ORIGIN' \
-      ${'$'}(pkg-config --libs mpv)
+      ${'$'}(pkg-config --libs ${'$'}PKGS)
     """.trimIndent(),
 )
 val buildLinuxPlayerBridge = tasks.register<Exec>("buildLinuxPlayerBridge") {
