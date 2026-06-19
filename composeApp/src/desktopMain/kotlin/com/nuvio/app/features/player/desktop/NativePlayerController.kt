@@ -54,6 +54,7 @@ internal class NativePlayerController(
         sourceHeaders: Map<String, String>,
         playWhenReady: Boolean,
         initialPositionMs: Long,
+        decoderPriority: Int,
         onError: (String?) -> Unit,
     ) {
         val pending = PendingSource(
@@ -61,6 +62,7 @@ internal class NativePlayerController(
             headerLines = sourceHeaders.toHeaderLines(),
             playWhenReady = playWhenReady,
             initialPositionMs = initialPositionMs.coerceAtLeast(0L),
+            decoderPriority = decoderPriority,
             onError = onError,
         )
         pendingSource = pending
@@ -86,6 +88,7 @@ internal class NativePlayerController(
                     playWhenReady = pending.playWhenReady,
                     initialPositionMs = pending.initialPositionMs,
                     controlsPageUrl = NativePlayerBridge.controlsPageUrl,
+                    decoderPriority = pending.decoderPriority,
                     eventSink = eventSink,
                 )
                 if (handle == 0L) error("Native player did not return a handle.")
@@ -269,6 +272,7 @@ internal class NativePlayerController(
             sourceHeaders = pending.headerLines.toHeaderMap(),
             playWhenReady = pending.playWhenReady,
             initialPositionMs = pending.initialPositionMs,
+            decoderPriority = pending.decoderPriority,
             onError = pending.onError,
         )
     }
@@ -407,7 +411,7 @@ private fun SubtitleStyleState.toMpvSubtitlePosition(): Int =
     (100 - (bottomOffset / 2)).coerceIn(0, 150)
 
 private fun SubtitleStyleState.toMpvSubtitleFontSize(): Float =
-    (fontSizeSp * 3f).coerceIn(24f, 96f)
+    (fontSizeSp * 3f).coerceIn(18f, 96f)
 
 private fun Int.toHexByte(): String {
     val digits = "0123456789ABCDEF"
@@ -423,6 +427,7 @@ private data class PendingSource(
     val headerLines: List<String>,
     val playWhenReady: Boolean,
     val initialPositionMs: Long,
+    val decoderPriority: Int,
     val onError: (String?) -> Unit,
 )
 
