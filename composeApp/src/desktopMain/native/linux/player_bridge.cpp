@@ -21,10 +21,13 @@
 
 #include <jni.h>
 #include <mpv/client.h>
+#include <mpv/render_gl.h>
 
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
 #include <webkit2/webkit2.h>
+#include <epoxy/gl.h>
+#include <GL/glx.h>
 #include <X11/Xlib.h>
 
 #include <atomic>
@@ -56,6 +59,11 @@ struct PlayerInstance {
     std::string controlsUrl;     // file:// URL of the HTML controls page
     GtkWidget *gtkWindow = nullptr;
     WebKitWebView *webView = nullptr;
+
+    // Render-API path (NUVIO_LINUX_RENDER): mpv renders into a GtkGLArea.
+    bool renderMode = false;
+    mpv_render_context *renderCtx = nullptr;
+    GtkWidget *glArea = nullptr;
 };
 
 // Guards PlayerInstance *lifetime*. The app polls state (positionMs, isPaused,
@@ -263,6 +271,128 @@ void createOverlayOnGtk(PlayerInstance *player) {
                  player->hostWid, rgba != nullptr ? 1 : 0);
 }
 
+// ---- mpv render-API into a GtkGLArea -------------------------------------
+// Alternative to wid embedding: mpv (vo=libmpv) renders into a GtkGLArea via the
+// OpenGL render API. The GLArea lives in the same GTK window as the (transparent)
+// WebKitWebView under a GtkOverlay, so GTK composites video + controls in-process
+// — avoiding the X11 sibling-window conflict of the child-reparent overlay.
+
+void *renderGetProcAddress(void *, const char *name) {
+    return reinterpret_cast<void *>(glXGetProcAddressARB(reinterpret_cast<const GLubyte *>(name)));
+}
+
+// Called by mpv (possibly off the GTK thread) when a new frame is ready.
+void onMpvRedraw(void *ctx) {
+    auto *player = static_cast<PlayerInstance *>(ctx);
+    runOnGtk([player]() {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_live.count(player) != 0 && player->glArea != nullptr) {
+            gtk_gl_area_queue_render(GTK_GL_AREA(player->glArea));
+        }
+    });
+}
+
+void onGlAreaRealize(GtkGLArea *area, gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    gtk_gl_area_make_current(area);
+    if (gtk_gl_area_get_error(area) != nullptr) {
+        std::fprintf(stderr, "[nuvio-player] GtkGLArea GL init error\n");
+        return;
+    }
+    mpv_opengl_init_params glInit;
+    glInit.get_proc_address = renderGetProcAddress;
+    glInit.get_proc_address_ctx = nullptr;
+    int advanced = 1;
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
+        {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &glInit},
+        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced},
+        {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+    if (mpv_render_context_create(&player->renderCtx, player->mpv, params) < 0) {
+        std::fprintf(stderr, "[nuvio-player] mpv_render_context_create failed\n");
+        player->renderCtx = nullptr;
+        return;
+    }
+    mpv_render_context_set_update_callback(player->renderCtx, onMpvRedraw, player);
+    std::fprintf(stderr, "[nuvio-player] render context created\n");
+}
+
+gboolean onGlAreaRender(GtkGLArea *area, GdkGLContext *, gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    if (player->renderCtx == nullptr) {
+        return FALSE;
+    }
+    GLint fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    const int scale = gtk_widget_get_scale_factor(GTK_WIDGET(area));
+    mpv_opengl_fbo mpfbo;
+    mpfbo.fbo = static_cast<int>(fbo);
+    mpfbo.w = gtk_widget_get_allocated_width(GTK_WIDGET(area)) * scale;
+    mpfbo.h = gtk_widget_get_allocated_height(GTK_WIDGET(area)) * scale;
+    mpfbo.internal_format = 0;
+    int flipY = 1;
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_OPENGL_FBO, &mpfbo},
+        {MPV_RENDER_PARAM_FLIP_Y, &flipY},
+        {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+    mpv_render_context_render(player->renderCtx, params);
+    return TRUE;
+}
+
+void onGlAreaUnrealize(GtkGLArea *area, gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    gtk_gl_area_make_current(area);
+    if (player->renderCtx != nullptr) {
+        mpv_render_context_free(player->renderCtx);
+        player->renderCtx = nullptr;
+    }
+}
+
+// Runs on the GTK thread (caller holds g_mutex and verified the player is live).
+void createRenderWindowOnGtk(PlayerInstance *player) {
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+
+    // Realize the (empty) window to get its X11 window, then reparent it into the
+    // AWT host BEFORE the GtkGLArea creates its GL context. Creating the GL
+    // context first and reparenting after invalidates the GLX drawable
+    // (GLXBadDrawable, fatal). So: realize -> reparent -> add GLArea -> show.
+    gtk_widget_realize(window);
+    GdkWindow *gdkWindow = gtk_widget_get_window(window);
+    Window overlayXid = GDK_WINDOW_XID(gdkWindow);
+    Display *display = GDK_WINDOW_XDISPLAY(gdkWindow);
+
+    int w = 1280;
+    int h = 720;
+    XWindowAttributes attrs;
+    if (XGetWindowAttributes(display, player->hostWid, &attrs) != 0) {
+        w = attrs.width;
+        h = attrs.height;
+    }
+    XReparentWindow(display, overlayXid, player->hostWid, 0, 0);
+    gtk_window_resize(GTK_WINDOW(window), w, h);
+    XResizeWindow(display, overlayXid, w, h);
+
+    GtkWidget *glArea = gtk_gl_area_new();
+    gtk_gl_area_set_has_alpha(GTK_GL_AREA(glArea), FALSE);
+    gtk_gl_area_set_auto_render(GTK_GL_AREA(glArea), TRUE);
+    g_signal_connect(glArea, "realize", G_CALLBACK(onGlAreaRealize), player);
+    g_signal_connect(glArea, "unrealize", G_CALLBACK(onGlAreaUnrealize), player);
+    g_signal_connect(glArea, "render", G_CALLBACK(onGlAreaRender), player);
+    gtk_container_add(GTK_CONTAINER(window), glArea);
+    player->gtkWindow = window;
+    player->glArea = glArea;
+
+    // Show realizes the GLArea -> GL context is created for the reparented window.
+    gtk_widget_show_all(window);
+    XMapWindow(display, overlayXid);
+    XFlush(display);
+    std::fprintf(stderr, "[nuvio-player] render window embedded over host wid=%lu (%dx%d)\n",
+                 player->hostWid, w, h);
+}
+
 // ---- track-list (audio/subtitle) JSON ------------------------------------
 // Produces the JSON shape NativePlayerController deserializes (NativeMpvTrack):
 //   [{"index":0,"id":"1","label":"...","language":"eng","selected":true,"forced":false}, ...]
@@ -438,6 +568,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     env->GetJavaVM(&player->jvm);
     player->hostWid = static_cast<unsigned long>(hostViewPtr);
     player->controlsUrl = jstringToUtf8(env, controlsPageUrl);
+    player->renderMode = (std::getenv("NUVIO_LINUX_RENDER") != nullptr);
     if (eventSink != nullptr) {
         player->eventSink = env->NewGlobalRef(eventSink);
         jclass sinkClass = env->GetObjectClass(eventSink);
@@ -463,16 +594,18 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     mpv_set_option_string(mpv, "input-default-bindings", "no");
     mpv_set_option_string(mpv, "input-vo-keyboard", "no");
     mpv_set_option_string(mpv, "keep-open", "yes");
-    mpv_set_option_string(mpv, "vo", "gpu-next");
     mpv_set_option_string(mpv, "hwdec", "auto-safe");
     mpv_set_option_string(mpv, "force-window", "no");
-    // Embedding via "wid" is X11-only. On a Wayland session mpv's auto context
-    // would create its own wl_surface and ignore wid, opening a separate window.
-    // The host AWT Canvas is an X11/XWayland window, so force an X11 GPU context.
-    // Use GLX ("x11") rather than EGL ("x11egl"): EGL fails to make its context
-    // current on a foreign AWT window (visual/config mismatch); GLX is the
-    // well-tested path for embedding mpv into an arbitrary X11 window.
-    mpv_set_option_string(mpv, "gpu-context", "x11");
+    if (player->renderMode) {
+        // Render API: mpv renders into our GtkGLArea's GL context (no own window).
+        mpv_set_option_string(mpv, "vo", "libmpv");
+    } else {
+        mpv_set_option_string(mpv, "vo", "gpu-next");
+        // Embedding via "wid" is X11-only. On a Wayland session mpv's auto context
+        // would create its own wl_surface and ignore wid; force an X11 GLX context
+        // (EGL fails to make its context current on the foreign AWT window).
+        mpv_set_option_string(mpv, "gpu-context", "x11");
+    }
 
     // Initial playback state, applied to the first loaded file. Set as options
     // before mpv_initialize rather than as positional loadfile arguments (the
@@ -506,9 +639,12 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     }
 
     // Embed mpv into the host AWT Canvas X11 window (its XID, from
-    // LinuxAwtViewResolver.getWindow()).
+    // LinuxAwtViewResolver.getWindow()). Render mode embeds via the GtkGLArea
+    // instead, so wid is only set for the direct-embedding path.
     int64_t wid = static_cast<int64_t>(hostViewPtr);
-    mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &wid);
+    if (!player->renderMode) {
+        mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &wid);
+    }
 
     if (mpv_initialize(mpv) < 0) {
         std::fprintf(stderr, "[nuvio-player] mpv_initialize failed (wid=%lld)\n",
@@ -537,22 +673,27 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
         g_live.insert(player);
     }
 
-    // Build the controls overlay on the GTK thread. Re-check liveness there in
-    // case dispose() raced ahead before the task ran.
-    //
-    // DISABLED BY DEFAULT: reparenting a WebKitGTK child window alongside mpv's
-    // GLX child in the AWT window causes X11 conflicts (RenderBadPicture /
-    // BadWindow), corrupts mpv rendering, and doesn't composite. Needs a
-    // different architecture (out-of-process webview, or mpv render-API into a
-    // GTK GLArea with GtkOverlay). Opt in with NUVIO_LINUX_OVERLAY=1 to iterate.
-    static const bool overlayEnabled = std::getenv("NUVIO_LINUX_OVERLAY") != nullptr;
-    if (overlayEnabled && !player->controlsUrl.empty()) {
+    // Set up the GTK-side window. Re-check liveness on the GTK thread in case
+    // dispose() raced ahead before the task ran.
+    if (player->renderMode) {
+        // Render-API path: mpv renders into a GtkGLArea embedded in the AWT window.
         runOnGtk([player]() {
             std::lock_guard<std::mutex> lock(g_mutex);
             if (g_live.count(player) != 0) {
-                createOverlayOnGtk(player);
+                createRenderWindowOnGtk(player);
             }
         });
+    } else {
+        // Legacy child-reparent overlay (broken; see NUVIO_LINUX_OVERLAY notes).
+        static const bool overlayEnabled = std::getenv("NUVIO_LINUX_OVERLAY") != nullptr;
+        if (overlayEnabled && !player->controlsUrl.empty()) {
+            runOnGtk([player]() {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_live.count(player) != 0) {
+                    createOverlayOnGtk(player);
+                }
+            });
+        }
     }
 
     return reinterpret_cast<jlong>(player);
@@ -569,15 +710,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *en
     // g_mutex) sees it gone and returns instead of touching freed state.
     g_live.erase(player);
 
-    // Destroy the overlay on the GTK thread, capturing the widget by value so it
-    // is safe even after this instance is freed below.
-    GtkWidget *overlay = player->gtkWindow;
-    player->gtkWindow = nullptr;
-    player->webView = nullptr;
-    if (overlay != nullptr) {
-        runOnGtk([overlay]() { gtk_widget_destroy(overlay); });
-    }
-
+    // Stop the event thread before tearing anything down.
     player->running.store(false);
     if (player->mpv != nullptr) {
         mpv_wakeup(player->mpv);
@@ -585,13 +718,50 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *en
     if (player->eventThread.joinable()) {
         player->eventThread.join();
     }
-    if (player->mpv != nullptr) {
-        mpv_terminate_destroy(player->mpv);
-        player->mpv = nullptr;
-    }
     if (player->eventSink != nullptr) {
         env->DeleteGlobalRef(player->eventSink);
         player->eventSink = nullptr;
+    }
+
+    if (player->renderMode) {
+        // Render context + mpv must be torn down on the GTK thread (GL owner):
+        // render_context_free before terminate_destroy, and the window destroyed
+        // last so no further render callback touches the instance. The GTK task
+        // owns the instance and frees it.
+        runOnGtk([player]() {
+            if (player->glArea != nullptr) {
+                gtk_gl_area_make_current(GTK_GL_AREA(player->glArea));
+            }
+            if (player->renderCtx != nullptr) {
+                mpv_render_context_free(player->renderCtx);
+                player->renderCtx = nullptr;
+            }
+            GtkWidget *window = player->gtkWindow;
+            player->gtkWindow = nullptr;
+            player->glArea = nullptr;
+            if (window != nullptr) {
+                gtk_widget_destroy(window);
+            }
+            if (player->mpv != nullptr) {
+                mpv_terminate_destroy(player->mpv);
+                player->mpv = nullptr;
+            }
+            delete player;
+        });
+        return;
+    }
+
+    // Legacy wid / child-overlay path: destroy the overlay window (if any) on the
+    // GTK thread, then terminate mpv here.
+    GtkWidget *overlay = player->gtkWindow;
+    player->gtkWindow = nullptr;
+    player->webView = nullptr;
+    if (overlay != nullptr) {
+        runOnGtk([overlay]() { gtk_widget_destroy(overlay); });
+    }
+    if (player->mpv != nullptr) {
+        mpv_terminate_destroy(player->mpv);
+        player->mpv = nullptr;
     }
     delete player;
 }

@@ -602,7 +602,7 @@ val linuxPlayerBridgeCommand = listOf(
     "-c",
     """
     set -eu
-    PKGS='mpv gtk+-3.0 webkit2gtk-4.1'
+    PKGS='mpv gtk+-3.0 webkit2gtk-4.1 epoxy gl x11'
     for pkg in ${'$'}PKGS; do
       if ! pkg-config --exists "${'$'}pkg"; then
         echo "Linux player bridge: missing dev package '${'$'}pkg' (pkg-config). Install it (e.g. mpv, gtk3, webkit2gtk-4.1)." >&2
