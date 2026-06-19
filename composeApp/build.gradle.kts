@@ -460,6 +460,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
 
 val isMacHost = System.getProperty("os.name").contains("mac", ignoreCase = true)
 val isWindowsHost = System.getProperty("os.name").contains("win", ignoreCase = true)
+val isLinuxHost = System.getProperty("os.name").contains("linux", ignoreCase = true)
 val mpvKitDir = providers.gradleProperty("nuvio.mpvkit.dir")
     .orElse(rootProject.layout.projectDirectory.dir("MPVKit").asFile.absolutePath)
 val macosPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/macos/player_bridge.mm")
@@ -582,6 +583,46 @@ val buildMacosPlayerBridge = tasks.register<Exec>("buildMacosPlayerBridge") {
     inputs.files(mpvKitGeneratedPkgConfigDirs.mapNotNull { it.parentFile?.resolve("lib")?.takeIf(File::exists) })
     outputs.file(macosPlayerBridgeOutput)
     commandLine(macosPlayerBridgeCommand)
+}
+
+// --- Linux player bridge (libmpv via system pkg-config; X11/WebKitGTK later) ---
+val linuxPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/linux/player_bridge.cpp")
+val linuxPlayerBridgeOutput = layout.buildDirectory.file("native/linux/libplayer_bridge.so")
+val linuxPlayerBridgeSourceFile = linuxPlayerBridgeSource.asFile
+val linuxPlayerBridgeOutputFile = linuxPlayerBridgeOutput.get().asFile
+val linuxPlayerBridgeJavaHome = providers.systemProperty("java.home").get()
+val linuxPlayerBridgeCompiler = providers.gradleProperty("nuvio.linux.cxx").orNull
+    ?: System.getenv("CXX")
+    ?: "g++"
+if (isLinuxHost) {
+    linuxPlayerBridgeOutputFile.parentFile.mkdirs()
+}
+val linuxPlayerBridgeCommand = listOf(
+    "/bin/sh",
+    "-c",
+    """
+    set -eu
+    if ! pkg-config --exists mpv; then
+      echo 'Linux player bridge: libmpv dev files not found via pkg-config (install mpv/libmpv).' >&2
+      exit 1
+    fi
+    exec ${shellQuote(linuxPlayerBridgeCompiler)} \
+      -std=c++17 -fPIC -shared -O2 -pthread \
+      ${shellQuote(linuxPlayerBridgeSourceFile.absolutePath)} \
+      -o ${shellQuote(linuxPlayerBridgeOutputFile.absolutePath)} \
+      -I${shellQuote("$linuxPlayerBridgeJavaHome/include")} \
+      -I${shellQuote("$linuxPlayerBridgeJavaHome/include/linux")} \
+      ${'$'}(pkg-config --cflags mpv) \
+      -Wl,-rpath,'${'$'}ORIGIN' \
+      ${'$'}(pkg-config --libs mpv)
+    """.trimIndent(),
+)
+val buildLinuxPlayerBridge = tasks.register<Exec>("buildLinuxPlayerBridge") {
+    notCompatibleWithConfigurationCache("Builds a host-local player bridge against system libmpv for Linux.")
+    enabled = isLinuxHost
+    inputs.file(linuxPlayerBridgeSource)
+    outputs.file(linuxPlayerBridgeOutput)
+    commandLine(linuxPlayerBridgeCommand)
 }
 
 val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
@@ -819,6 +860,12 @@ tasks.withType<Jar>().configureEach {
             into("native/windows")
         }
     }
+    if (isLinuxHost && name == "desktopJar") {
+        dependsOn(buildLinuxPlayerBridge)
+        from(linuxPlayerBridgeOutput) {
+            into("native/linux")
+        }
+    }
 }
 
 if (isWindowsHost) {
@@ -846,6 +893,34 @@ if (isWindowsHost) {
     )
     tasks.matching { it.name in desktopNativePlayerTasks }.configureEach {
         dependsOn(buildWindowsPlayerBridge, prepareWindowsPlayerRuntime, generateWindowsPlayerRuntimeIndex)
+    }
+}
+
+if (isLinuxHost) {
+    val linuxDesktopNativePlayerTasks = setOf(
+        "run",
+        "runRelease",
+        "desktopRun",
+        "runDistributable",
+        "runReleaseDistributable",
+        "desktopRunHot",
+        "hotRunDesktop",
+        "hotRunDesktopAsync",
+        "hotDevDesktop",
+        "hotDevDesktopAsync",
+        "createDistributable",
+        "createReleaseDistributable",
+        "createRuntimeImage",
+        "package",
+        "packageDistributionForCurrentOS",
+        "packageDeb",
+        "packageUberJarForCurrentOS",
+        "packageReleaseDistributionForCurrentOS",
+        "packageReleaseDeb",
+        "packageReleaseUberJarForCurrentOS",
+    )
+    tasks.matching { it.name in linuxDesktopNativePlayerTasks }.configureEach {
+        dependsOn(buildLinuxPlayerBridge)
     }
 }
 
@@ -978,6 +1053,7 @@ compose.desktop {
             "--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED",
             "--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
             "--add-opens=java.desktop/sun.awt.windows=ALL-UNNAMED",
+            "--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED",
             smokePlayerUrl?.takeIf { it.isNotBlank() }?.let { "-Dnuvio.desktop.smokePlayerUrl=$it" },
         )
 

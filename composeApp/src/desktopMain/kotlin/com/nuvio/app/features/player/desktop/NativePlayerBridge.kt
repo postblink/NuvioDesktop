@@ -118,7 +118,11 @@ internal object NativePlayerBridge {
 
     private fun loadNativeLibrary() {
         val platform = DesktopHostOs.current
-        require(platform == DesktopHostOs.MACOS || platform == DesktopHostOs.WINDOWS) {
+        require(
+            platform == DesktopHostOs.MACOS ||
+                platform == DesktopHostOs.WINDOWS ||
+                platform == DesktopHostOs.LINUX
+        ) {
             "Native desktop playback is not implemented for $platform yet."
         }
 
@@ -184,6 +188,7 @@ internal object NativePlayerBridge {
 
         return when (platformDir) {
             "windows" -> listOf("libmpv-2.dll")
+            "linux" -> listOf("libmpv.so.2")
             else -> emptyList()
         }
     }

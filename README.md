@@ -18,6 +18,12 @@
 
 </div>
 
+> [!NOTE]
+> **Unofficial Linux port.** This fork adds a native Linux build of Nuvio Desktop while
+> aiming to stay as faithful as possible to the official upstream branch. It tracks
+> [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and is intended as a
+> stopgap until an official Linux release lands, at which point this port defers to it.
+
 ## About
 
 Nuvio Desktop is a media client for browsing metadata, managing collections and watch progress, downloading media, and playing streams from user-installed extensions or user-provided sources.

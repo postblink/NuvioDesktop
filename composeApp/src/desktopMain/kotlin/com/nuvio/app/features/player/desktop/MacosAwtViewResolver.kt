@@ -9,6 +9,7 @@ internal object AwtNativeViewResolver {
         when (DesktopHostOs.current) {
             DesktopHostOs.MACOS -> MacosAwtViewResolver.resolveNativeViewPointer(component)
             DesktopHostOs.WINDOWS -> WindowsAwtViewResolver.resolveNativeViewPointer(component)
+            DesktopHostOs.LINUX -> LinuxAwtViewResolver.resolveNativeViewPointer(component)
             else -> error("Native desktop playback is not implemented for ${DesktopHostOs.current}.")
         }
 }
@@ -62,6 +63,41 @@ private object WindowsAwtViewResolver {
         val pointer = invokeLong(peer, "getHWnd")
         if (pointer == 0L) {
             error("Windows AWT HWND pointer was zero.")
+        }
+        return pointer
+    }
+
+    private fun findMethod(type: Class<*>, name: String): Method {
+        var current: Class<*>? = type
+        while (current != null) {
+            runCatching {
+                return current.getDeclaredMethod(name).apply { isAccessible = true }
+            }
+            current = current.superclass
+        }
+        error("Method $name was not found on ${type.name}.")
+    }
+
+    private fun invokeLong(target: Any, methodName: String): Long =
+        (findMethod(target.javaClass, methodName).invoke(target) as Number).toLong()
+}
+
+private object LinuxAwtViewResolver {
+    private val componentPeerField: Field by lazy {
+        Component::class.java.getDeclaredField("peer").apply { isAccessible = true }
+    }
+
+    fun resolveNativeViewPointer(component: Component): Long {
+        val peer = componentPeerField.get(component)
+            ?: error("AWT component peer is not ready for native playback.")
+
+        // On the OpenJDK X11 backend the component peer (XCanvasPeer ->
+        // XComponentPeer -> XBaseWindow) exposes the native X11 window id via
+        // getWindow(). This is the XID mpv embeds into through its "wid" option.
+        // Requires --add-opens java.desktop/sun.awt.X11=ALL-UNNAMED to reflect.
+        val pointer = invokeLong(peer, "getWindow")
+        if (pointer == 0L) {
+            error("Linux AWT X11 window id was zero.")
         }
         return pointer
     }

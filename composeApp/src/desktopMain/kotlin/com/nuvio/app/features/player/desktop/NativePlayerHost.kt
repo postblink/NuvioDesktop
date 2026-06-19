@@ -6,6 +6,8 @@ import java.awt.Cursor
 import java.awt.Graphics
 import java.awt.Point
 import java.awt.Toolkit
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
 import java.awt.image.BufferedImage
@@ -33,7 +35,10 @@ internal class NativePlayerHost : Canvas() {
 
     init {
         background = Color.BLACK
-        ignoreRepaint = false
+        // On Linux, mpv renders into this Canvas's X11 window via GLX. Letting AWT
+        // auto-repaint (black-fill) over the mpv surface causes black artifacting,
+        // so suppress AWT repaints there. Other platforms keep the default.
+        ignoreRepaint = DesktopHostOs.current == DesktopHostOs.LINUX
         addMouseMotionListener(object : MouseMotionAdapter() {
             override fun mouseMoved(event: MouseEvent) {
                 noteCursorActivity()
@@ -41,6 +46,19 @@ internal class NativePlayerHost : Canvas() {
 
             override fun mouseDragged(event: MouseEvent) {
                 noteCursorActivity()
+            }
+        })
+        // On Linux/X11 a heavyweight Canvas inside a Compose SwingPanel may not
+        // receive paint() callbacks reliably, which would stall the first-paint
+        // gating that triggers native player attach. Resize/show events are
+        // reliable across platforms, so drive the same notifications from them.
+        addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(event: ComponentEvent) {
+                notifyPaintProgress()
+            }
+
+            override fun componentShown(event: ComponentEvent) {
+                notifyPaintProgress()
             }
         })
     }
@@ -99,6 +117,10 @@ internal class NativePlayerHost : Canvas() {
     override fun paint(graphics: Graphics) {
         graphics.color = Color.BLACK
         graphics.fillRect(0, 0, width, height)
+        notifyPaintProgress()
+    }
+
+    private fun notifyPaintProgress() {
         if (!firstPaintNotified) {
             firstPaintNotified = true
             onFirstPaint?.invoke()
