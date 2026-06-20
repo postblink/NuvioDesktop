@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Replay10
@@ -91,6 +92,7 @@ internal fun PlayerControlsShell(
     onEpisodesClick: (() -> Unit)? = null,
     onOpenInExternalPlayer: (() -> Unit)? = null,
     onFullscreenClick: (() -> Unit)? = null,
+    isFullscreen: Boolean = false,
     onSubmitIntroClick: (() -> Unit)? = null,
     parentalWarnings: List<ParentalWarning> = emptyList(),
     showParentalGuide: Boolean = false,
@@ -193,6 +195,7 @@ internal fun PlayerControlsShell(
                     onEpisodesClick = onEpisodesClick,
                     onOpenInExternalPlayer = onOpenInExternalPlayer,
                     onFullscreenClick = onFullscreenClick,
+                    isFullscreen = isFullscreen,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
@@ -492,6 +495,7 @@ private fun ProgressControls(
     onEpisodesClick: (() -> Unit)? = null,
     onOpenInExternalPlayer: (() -> Unit)? = null,
     onFullscreenClick: (() -> Unit)? = null,
+    isFullscreen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val durationMs = playbackSnapshot.durationMs.coerceAtLeast(1L)
@@ -559,13 +563,6 @@ private fun ProgressControls(
                         painter = audioPainter,
                         onClick = onAudioClick,
                     )
-                    if (onFullscreenClick != null) {
-                        PlayerActionPillButton(
-                            label = "Fullscreen",
-                            icon = Icons.Rounded.Fullscreen,
-                            onClick = onFullscreenClick,
-                        )
-                    }
                     if (onSourcesClick != null) {
                         PlayerActionPillButton(
                             label = stringResource(Res.string.compose_player_sources),
@@ -585,6 +582,13 @@ private fun ProgressControls(
                             label = stringResource(Res.string.streams_open_external_player),
                             icon = Icons.AutoMirrored.Rounded.OpenInNew,
                             onClick = onOpenInExternalPlayer,
+                        )
+                    }
+                    if (onFullscreenClick != null) {
+                        PlayerActionPillButton(
+                            label = if (isFullscreen) "Exit" else "Fullscreen",
+                            icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                            onClick = onFullscreenClick,
                         )
                     }
                 }

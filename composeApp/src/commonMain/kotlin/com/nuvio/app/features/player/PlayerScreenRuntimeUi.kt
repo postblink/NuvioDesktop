@@ -4,14 +4,24 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
 import com.nuvio.app.core.ui.nuvio
 import com.nuvio.app.features.debrid.DebridSettingsRepository
@@ -38,6 +48,10 @@ import org.jetbrains.compose.resources.stringResource
 @Composable
 internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
     val runtime = this
+    val keyboardFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        if (isDesktop) runCatching { keyboardFocus.requestFocus() }
+    }
     val displayedPositionMs = scrubbingPositionMs ?: playbackSnapshot.positionMs
     val seasonNumber = activeSeasonNumber
     val episodeNumber = activeEpisodeNumber
@@ -330,6 +344,16 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .then(
+                if (isDesktop) {
+                    Modifier
+                        .focusRequester(keyboardFocus)
+                        .focusable()
+                        .onPreviewKeyEvent { runtime.handlePlayerKey(it) }
+                } else {
+                    Modifier
+                },
+            )
             .onSizeChanged { layoutSize = it }
             .playerSurfaceTapGestures(
                 layoutSize = layoutSize,
@@ -441,6 +465,31 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
     }
 }
 
+// Desktop keyboard shortcuts on the player surface. Returns true if consumed.
+private fun PlayerScreenRuntime.handlePlayerKey(event: KeyEvent): Boolean {
+    if (event.type != KeyEventType.KeyDown || playerControlsLocked) return false
+    return when (event.key) {
+        Key.Spacebar -> { togglePlayback(); true }
+        Key.DirectionLeft -> { seekBy(-10_000L); true }
+        Key.DirectionRight -> { seekBy(10_000L); true }
+        Key.F -> {
+            isFullscreen = !isFullscreen
+            playerController?.toggleFullscreen()
+            true
+        }
+        Key.Escape -> {
+            if (isFullscreen) {
+                isFullscreen = false
+                playerController?.toggleFullscreen()
+                true
+            } else {
+                false
+            }
+        }
+        else -> false
+    }
+}
+
 @Composable
 private fun PlayerScreenRuntime.RenderPlayerControls(displayedPositionMs: Long, isEpisode: Boolean) {
     AnimatedVisibility(
@@ -530,10 +579,14 @@ private fun PlayerScreenRuntime.RenderPlayerControls(displayedPositionMs: Long, 
                 null
             },
             onFullscreenClick = if (isDesktop) {
-                { playerController?.toggleFullscreen() }
+                {
+                    isFullscreen = !isFullscreen
+                    playerController?.toggleFullscreen()
+                }
             } else {
                 null
             },
+            isFullscreen = isFullscreen,
             parentalWarnings = parentalWarnings,
             showParentalGuide = showParentalGuide,
             onParentalGuideAnimationComplete = { showParentalGuide = false },

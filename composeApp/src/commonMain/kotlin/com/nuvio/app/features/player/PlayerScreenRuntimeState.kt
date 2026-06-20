@@ -94,6 +94,8 @@ internal class PlayerScreenRuntime(
     var controlsVisible by mutableStateOf(true)
     var controlsActivityTick by mutableStateOf(0)
     var playerControlsLocked by mutableStateOf(false)
+    // Desktop only: tracks host-window fullscreen for the controls glyph / Esc.
+    var isFullscreen by mutableStateOf(false)
     var activeSourceUrl by mutableStateOf(sourceUrl)
     var activeSourceAudioUrl by mutableStateOf(sourceAudioUrl)
     var activeSourceHeaders by mutableStateOf(sanitizePlaybackHeaders(sourceHeaders))
