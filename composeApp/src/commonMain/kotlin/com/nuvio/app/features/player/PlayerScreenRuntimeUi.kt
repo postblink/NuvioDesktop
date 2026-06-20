@@ -529,6 +529,11 @@ private fun PlayerScreenRuntime.RenderPlayerControls(displayedPositionMs: Long, 
             } else {
                 null
             },
+            onFullscreenClick = if (isDesktop) {
+                { playerController?.toggleFullscreen() }
+            } else {
+                null
+            },
             parentalWarnings = parentalWarnings,
             showParentalGuide = showParentalGuide,
             onParentalGuideAnimationComplete = { showParentalGuide = false },

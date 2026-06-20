@@ -20,6 +20,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import com.nuvio.app.features.player.desktop.NativePlayerBridge
 import com.nuvio.app.features.player.desktop.NativePlayerEventSink
+import com.nuvio.app.features.player.desktop.toggleDesktopAppFullscreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -236,6 +237,10 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun retry() = Unit
+
+    override fun toggleFullscreen() {
+        toggleDesktopAppFullscreen()
+    }
 
     override fun setPlaybackSpeed(speed: Float) {
         handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSpeed(it, speed) }

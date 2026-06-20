@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Forward10
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Replay10
@@ -89,6 +90,7 @@ internal fun PlayerControlsShell(
     onSourcesClick: (() -> Unit)? = null,
     onEpisodesClick: (() -> Unit)? = null,
     onOpenInExternalPlayer: (() -> Unit)? = null,
+    onFullscreenClick: (() -> Unit)? = null,
     onSubmitIntroClick: (() -> Unit)? = null,
     parentalWarnings: List<ParentalWarning> = emptyList(),
     showParentalGuide: Boolean = false,
@@ -190,6 +192,7 @@ internal fun PlayerControlsShell(
                     onSourcesClick = onSourcesClick,
                     onEpisodesClick = onEpisodesClick,
                     onOpenInExternalPlayer = onOpenInExternalPlayer,
+                    onFullscreenClick = onFullscreenClick,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
@@ -488,6 +491,7 @@ private fun ProgressControls(
     onSourcesClick: (() -> Unit)? = null,
     onEpisodesClick: (() -> Unit)? = null,
     onOpenInExternalPlayer: (() -> Unit)? = null,
+    onFullscreenClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val durationMs = playbackSnapshot.durationMs.coerceAtLeast(1L)
@@ -555,6 +559,13 @@ private fun ProgressControls(
                         painter = audioPainter,
                         onClick = onAudioClick,
                     )
+                    if (onFullscreenClick != null) {
+                        PlayerActionPillButton(
+                            label = "Fullscreen",
+                            icon = Icons.Rounded.Fullscreen,
+                            onClick = onFullscreenClick,
+                        )
+                    }
                     if (onSourcesClick != null) {
                         PlayerActionPillButton(
                             label = stringResource(Res.string.compose_player_sources),
