@@ -6,6 +6,15 @@ the Linux-specific work layered on top.
 
 ## [Unreleased] — Linux port
 
+### Player architecture (final)
+- Linux in-app playback renders **mpv frames in software into a Compose `Canvas`**
+  (`NativePlayerBridge.renderFrame` + mpv's SW render API, `LinuxComposePlayer.kt`), with the
+  app's shared Compose `PlayerControlsShell` drawn over them — the same model the Android
+  target uses. This replaces the Windows/macOS native-window + native-overlay pattern, which
+  is fundamentally incompatible with X11 (no compositing of overlay windows over the embedded
+  video). The earlier wid-embedding + WebKitGTK / GtkGLArea / floating-window overlay attempts
+  (documented below) each hit X11/GLX/occlusion walls and were abandoned.
+
 ### Added
 - Native Linux desktop video playback: an embedded **libmpv** player bridge
   (`composeApp/src/desktopMain/native/linux/player_bridge.cpp`) implementing the full
@@ -27,6 +36,10 @@ the Linux-specific work layered on top.
   window — switched the GPU context to **GLX**.
 - Black artifacting from AWT repainting over the mpv surface (Linux-gated `ignoreRepaint`).
 
-### Known gaps (later phases)
-- In-player controls overlay (WebKitGTK), audio/subtitle track pickers, window chrome /
-  fullscreen X11 hints, and AppImage packaging are not yet implemented.
+### Known gaps / Linux caveats
+- Audio/subtitle **track pickers** and subtitle **styling** not yet wired in the Compose path
+  (`getAudioTracks`/`getSubtitleTracks` stubbed; the bridge already produces the track JSON).
+- Software rendering is **CPU-composited** (hwdec still decodes in hardware) — fine for 1080p,
+  heavier for 4K than the GPU path on Windows/macOS.
+- **AppImage** packaging pending; desktop fullscreen/chrome niceties unverified on Linux.
+- Dead code from the abandoned overlay approaches remains in the bridge (cleanup pending).

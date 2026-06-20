@@ -62,8 +62,16 @@ struct PlayerInstance {
 
     // Render-API path (NUVIO_LINUX_RENDER): mpv renders into a GtkGLArea.
     bool renderMode = false;
+    // Software-render path (Compose): mpv renders frames into a CPU buffer that
+    // Kotlin draws in a Compose Canvas via Skia. No window, no overlay.
+    bool swMode = false;
     mpv_render_context *renderCtx = nullptr;
     GtkWidget *glArea = nullptr;
+
+    // Controls protocol state (webview).
+    std::string pendingControlsJson; // latest structural state (window.playerControls)
+    bool controlsReady = false;      // webview sent "controlsReady"
+    guint syncTimerId = 0;           // periodic playback-state push (window.playerUpdate)
 };
 
 // Guards PlayerInstance *lifetime*. The app polls state (positionMs, isPaused,
@@ -159,6 +167,17 @@ void ensureGtkThread() {
     std::call_once(g_gtkOnce, []() {
         std::thread([]() {
             gtk_init(nullptr, nullptr);
+            // Make X errors non-fatal. Our overlay window is a child of the AWT
+            // Canvas, so when the player view is disposed the parent can be
+            // destroyed first, making teardown unmap/destroy hit BadWindow — and
+            // the default Xlib handler aborts the whole process. Log and continue.
+            XSetErrorHandler([](Display *d, XErrorEvent *e) -> int {
+                char buf[256];
+                XGetErrorText(d, e->error_code, buf, sizeof(buf));
+                std::fprintf(stderr, "[nuvio-player] X error ignored: %s (code %d, request %d)\n",
+                             buf, e->error_code, e->request_code);
+                return 0;
+            });
             gtk_main();
         }).detach();
     });
@@ -207,6 +226,55 @@ void dispatchEvent(PlayerInstance *player, const char *type, double value) {
     env->DeleteLocalRef(jtype);
 }
 
+// Forward declaration (defined in the track-list section below).
+std::string buildTracksJson(mpv_handle *mpv, const char *wantType);
+
+// Pushes live playback state to the controls via window.playerUpdate(). This is
+// what moves the controls off their loading skeleton and drives the scrubber.
+// Runs on the GTK thread.
+void syncControlsOnGtk(PlayerInstance *player) {
+    if (player->webView == nullptr || player->mpv == nullptr) {
+        return;
+    }
+    const double duration = getDouble(player->mpv, "duration", 0.0);
+    const double position = getDouble(player->mpv, "time-pos", 0.0);
+    const bool paused = getFlag(player->mpv, "pause", false);
+    const bool loading = getFlag(player->mpv, "paused-for-cache", false) ||
+                         getFlag(player->mpv, "seeking", false);
+    char head[256];
+    std::snprintf(head, sizeof(head),
+                  "window.playerUpdate({duration:%.3f,position:%.3f,paused:%s,loading:%s,audioTracks:",
+                  duration, position, paused ? "true" : "false", loading ? "true" : "false");
+    std::string script = head;
+    script += buildTracksJson(player->mpv, "audio");
+    script += ",subtitleTracks:";
+    script += buildTracksJson(player->mpv, "sub");
+    script += "});";
+    webkit_web_view_evaluate_javascript(player->webView, script.c_str(), -1,
+                                        nullptr, nullptr, nullptr, nullptr, nullptr);
+}
+
+// Applies the cached structural controls state via window.playerControls().
+void flushControlsOnGtk(PlayerInstance *player) {
+    if (player->webView == nullptr || !player->controlsReady || player->pendingControlsJson.empty()) {
+        return;
+    }
+    const std::string script = "window.playerControls(" + player->pendingControlsJson + ");";
+    webkit_web_view_evaluate_javascript(player->webView, script.c_str(), -1,
+                                        nullptr, nullptr, nullptr, nullptr, nullptr);
+}
+
+// Periodic timer (GTK thread): pushes live playback state until the player ends.
+gboolean onSyncTimer(gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_live.count(player) == 0) {
+        return G_SOURCE_REMOVE;
+    }
+    syncControlsOnGtk(player);
+    return G_SOURCE_CONTINUE;
+}
+
 // window.webkit.messageHandlers.player.postMessage({type, value})
 void onScriptMessage(WebKitUserContentManager *, WebKitJavascriptResult *result, gpointer userData) {
     auto *player = static_cast<PlayerInstance *>(userData);
@@ -219,7 +287,18 @@ void onScriptMessage(WebKitUserContentManager *, WebKitJavascriptResult *result,
     char *typeStr = (typeVal != nullptr && jsc_value_is_string(typeVal)) ? jsc_value_to_string(typeVal) : nullptr;
     double value = (valueVal != nullptr && jsc_value_is_number(valueVal)) ? jsc_value_to_double(valueVal) : 0.0;
     if (typeStr != nullptr) {
-        dispatchEvent(player, typeStr, value);
+        if (std::strcmp(typeStr, "controlsReady") == 0) {
+            // The page is ready: flush the cached structural state and push an
+            // immediate playback snapshot so the controls leave their skeleton.
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_live.count(player) != 0) {
+                player->controlsReady = true;
+                flushControlsOnGtk(player);
+                syncControlsOnGtk(player);
+            }
+        } else {
+            dispatchEvent(player, typeStr, value);
+        }
         g_free(typeStr);
     }
     if (typeVal != nullptr) g_object_unref(typeVal);
@@ -283,6 +362,11 @@ void *renderGetProcAddress(void *, const char *name) {
 
 // Called by mpv (possibly off the GTK thread) when a new frame is ready.
 void onMpvRedraw(void *ctx) {
+    static std::atomic<int> redrawCount{0};
+    const int c = ++redrawCount;
+    if (c % 120 == 1) {
+        std::fprintf(stderr, "[nuvio-player] mpv redraw callbacks: %d\n", c);
+    }
     auto *player = static_cast<PlayerInstance *>(ctx);
     runOnGtk([player]() {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -302,11 +386,12 @@ void onGlAreaRealize(GtkGLArea *area, gpointer data) {
     mpv_opengl_init_params glInit;
     glInit.get_proc_address = renderGetProcAddress;
     glInit.get_proc_address_ctx = nullptr;
-    int advanced = 1;
+    // No ADVANCED_CONTROL: that mode requires manual frame/swap management
+    // (mpv_render_context_update + report_swap). Without it, use mpv's simpler
+    // self-timed model where the update callback drives a queue_render per frame.
     mpv_render_param params[] = {
         {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
         {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &glInit},
-        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced},
         {MPV_RENDER_PARAM_INVALID, nullptr},
     };
     if (mpv_render_context_create(&player->renderCtx, player->mpv, params) < 0) {
@@ -322,6 +407,11 @@ gboolean onGlAreaRender(GtkGLArea *area, GdkGLContext *, gpointer data) {
     auto *player = static_cast<PlayerInstance *>(data);
     if (player->renderCtx == nullptr) {
         return FALSE;
+    }
+    static std::atomic<int> renderCount{0};
+    const int c = ++renderCount;
+    if (c % 120 == 1) {
+        std::fprintf(stderr, "[nuvio-player] gl renders: %d\n", c);
     }
     GLint fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
@@ -341,6 +431,25 @@ gboolean onGlAreaRender(GtkGLArea *area, GdkGLContext *, gpointer data) {
     return TRUE;
 }
 
+// Per-frame-clock poll: render when mpv reports a new frame. Reliable across the
+// initial frame (the edge-triggered update callback can be missed before the GL
+// context exists) without re-rendering every vsync.
+gboolean onGlAreaTick(GtkWidget *widget, GdkFrameClock *, gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    if (player->renderCtx != nullptr) {
+        const uint64_t flags = mpv_render_context_update(player->renderCtx);
+        if (flags & MPV_RENDER_UPDATE_FRAME) {
+            gtk_gl_area_queue_render(GTK_GL_AREA(widget));
+            // Force a window-level redraw so the composited GL result is presented
+            // to screen each frame (the embedded GLArea's GL swap alone stalls).
+            if (player->gtkWindow != nullptr) {
+                gtk_widget_queue_draw(player->gtkWindow);
+            }
+        }
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 void onGlAreaUnrealize(GtkGLArea *area, gpointer data) {
     auto *player = static_cast<PlayerInstance *>(data);
     gtk_gl_area_make_current(area);
@@ -350,10 +459,29 @@ void onGlAreaUnrealize(GtkGLArea *area, gpointer data) {
     }
 }
 
+void onWebLoadChanged(WebKitWebView *, WebKitLoadEvent event, gpointer) {
+    const char *name =
+        event == WEBKIT_LOAD_STARTED ? "started" :
+        event == WEBKIT_LOAD_REDIRECTED ? "redirected" :
+        event == WEBKIT_LOAD_COMMITTED ? "committed" :
+        event == WEBKIT_LOAD_FINISHED ? "finished" : "other";
+    std::fprintf(stderr, "[nuvio-player] webview load: %s\n", name);
+}
+
+gboolean onWebLoadFailed(WebKitWebView *, WebKitLoadEvent, gchar *uri, GError *error, gpointer) {
+    std::fprintf(stderr, "[nuvio-player] webview load FAILED: %s (%s)\n",
+                 uri, error != nullptr ? error->message : "unknown");
+    return FALSE;
+}
+
 // Runs on the GTK thread (caller holds g_mutex and verified the player is live).
 void createRenderWindowOnGtk(PlayerInstance *player) {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    // NOTE: do NOT set an RGBA visual here. It makes the GtkGLArea's GLX drawable
+    // invalid (GLXBadWindow) so rendered frames never reach the screen until a
+    // pause forces a different present path. The controls webview's transparency
+    // composites over the GLArea via cairo and needs no window-level alpha.
 
     // Realize the (empty) window to get its X11 window, then reparent it into the
     // AWT host BEFORE the GtkGLArea creates its GL context. Creating the GL
@@ -377,11 +505,48 @@ void createRenderWindowOnGtk(PlayerInstance *player) {
 
     GtkWidget *glArea = gtk_gl_area_new();
     gtk_gl_area_set_has_alpha(GTK_GL_AREA(glArea), FALSE);
-    gtk_gl_area_set_auto_render(GTK_GL_AREA(glArea), TRUE);
+    // auto_render FALSE: render only when mpv has a new frame (our queue_render),
+    // and keep the last frame so the overlay can recomposite without forcing a
+    // ~60fps GL re-render that contends with the webview overlay (flicker).
+    gtk_gl_area_set_auto_render(GTK_GL_AREA(glArea), FALSE);
     g_signal_connect(glArea, "realize", G_CALLBACK(onGlAreaRealize), player);
     g_signal_connect(glArea, "unrealize", G_CALLBACK(onGlAreaUnrealize), player);
     g_signal_connect(glArea, "render", G_CALLBACK(onGlAreaRender), player);
-    gtk_container_add(GTK_CONTAINER(window), glArea);
+    gtk_widget_add_tick_callback(glArea, onGlAreaTick, player, nullptr);
+
+    // GtkOverlay composites a transparent controls webview over the video GLArea.
+    // Both are GTK widgets in one window, so GTK handles the alpha compositing —
+    // no X11 sibling-window conflict (the failure mode of the child-reparent path).
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(overlay), glArea);
+
+    if (!player->controlsUrl.empty()) {
+        WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+        webkit_user_content_manager_register_script_message_handler(ucm, "player");
+        g_signal_connect(ucm, "script-message-received::player", G_CALLBACK(onScriptMessage), player);
+        WebKitWebView *web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
+        GdkRGBA transparent = {0.0, 0.0, 0.0, 0.0};
+        webkit_web_view_set_background_color(web, &transparent);
+        WebKitSettings *wkSettings = webkit_web_view_get_settings(web);
+        webkit_settings_set_enable_write_console_messages_to_stdout(wkSettings, TRUE);
+        // Render via cairo into GTK's draw cycle (not WebKit's own accelerated
+        // native surface), so GtkOverlay composites the controls OVER the GLArea
+        // video. With HW acceleration the webview's GL surface occludes/escapes
+        // the overlay and the controls never appear.
+        webkit_settings_set_hardware_acceleration_policy(wkSettings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+        g_signal_connect(web, "load-changed", G_CALLBACK(onWebLoadChanged), nullptr);
+        g_signal_connect(web, "load-failed", G_CALLBACK(onWebLoadFailed), nullptr);
+        // Fill the whole overlay; without explicit FILL alignment a GtkOverlay
+        // child is sized to its (zero) natural size and stays invisible.
+        gtk_widget_set_halign(GTK_WIDGET(web), GTK_ALIGN_FILL);
+        gtk_widget_set_valign(GTK_WIDGET(web), GTK_ALIGN_FILL);
+        gtk_widget_set_hexpand(GTK_WIDGET(web), TRUE);
+        gtk_widget_set_vexpand(GTK_WIDGET(web), TRUE);
+        player->webView = web;
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(web));
+    }
+
+    gtk_container_add(GTK_CONTAINER(window), overlay);
     player->gtkWindow = window;
     player->glArea = glArea;
 
@@ -389,8 +554,120 @@ void createRenderWindowOnGtk(PlayerInstance *player) {
     gtk_widget_show_all(window);
     XMapWindow(display, overlayXid);
     XFlush(display);
-    std::fprintf(stderr, "[nuvio-player] render window embedded over host wid=%lu (%dx%d)\n",
-                 player->hostWid, w, h);
+
+    if (player->webView != nullptr) {
+        if (std::getenv("NUVIO_LINUX_OVERLAY_TEST") != nullptr) {
+            // Diagnostic: a bright bar to confirm the overlay composites over video,
+            // independent of the real controls page / JS state.
+            webkit_web_view_load_html(player->webView,
+                "<html><body style='margin:0;font-family:sans-serif'>"
+                "<div style='position:fixed;left:0;right:0;bottom:0;height:90px;"
+                "background:rgba(220,30,30,0.7);color:#fff;display:flex;"
+                "align-items:center;justify-content:center;font-size:28px'>"
+                "OVERLAY TEST &mdash; if you see this, compositing works</div></body></html>",
+                nullptr);
+        } else {
+            webkit_web_view_load_uri(player->webView, player->controlsUrl.c_str());
+        }
+        // Push live playback state ~4x/sec so the controls track position/state.
+        player->syncTimerId = g_timeout_add(250, onSyncTimer, player);
+    }
+    std::fprintf(stderr, "[nuvio-player] render window embedded over host wid=%lu (%dx%d) controls=%d\n",
+                 player->hostWid, w, h, player->webView != nullptr ? 1 : 0);
+}
+
+// ---- Floating top-level controls overlay (wid-embedded video path) --------
+// Video stays embedded directly in the host AWT window via mpv's "wid" (which
+// presents flawlessly). The controls live in a SEPARATE transparent top-level
+// window glued over the player: top-level windows are composited with alpha by
+// the compositor, unlike sibling child windows or a GtkGLArea-in-GtkOverlay.
+
+// Periodic (GTK thread): keep the overlay positioned/sized over the host window,
+// hide it when the host isn't viewable, and push live playback state.
+gboolean onFloatingTimer(gpointer data) {
+    auto *player = static_cast<PlayerInstance *>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_live.count(player) == 0) {
+        return G_SOURCE_REMOVE;
+    }
+    if (player->gtkWindow != nullptr) {
+        GdkWindow *gdkWin = gtk_widget_get_window(player->gtkWindow);
+        if (gdkWin != nullptr) {
+            Display *dpy = GDK_WINDOW_XDISPLAY(gdkWin);
+            XWindowAttributes attrs;
+            Window childRet = 0;
+            int rx = 0;
+            int ry = 0;
+            if (XGetWindowAttributes(dpy, player->hostWid, &attrs) != 0 &&
+                attrs.map_state == IsViewable &&
+                XTranslateCoordinates(dpy, player->hostWid, attrs.root, 0, 0, &rx, &ry, &childRet) != 0) {
+                gtk_window_move(GTK_WINDOW(player->gtkWindow), rx, ry);
+                gtk_window_resize(GTK_WINDOW(player->gtkWindow), attrs.width, attrs.height);
+                if (!gtk_widget_get_visible(player->gtkWindow)) {
+                    gtk_widget_show(player->gtkWindow);
+                }
+                XRaiseWindow(dpy, GDK_WINDOW_XID(gdkWin));
+            } else if (gtk_widget_get_visible(player->gtkWindow)) {
+                gtk_widget_hide(player->gtkWindow);
+            }
+        }
+    }
+    syncControlsOnGtk(player);
+    return G_SOURCE_CONTINUE;
+}
+
+// Runs on the GTK thread (caller holds g_mutex and verified the player is live).
+void createFloatingOverlayOnGtk(PlayerInstance *player) {
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(window), TRUE);
+    gtk_window_set_skip_pager_hint(GTK_WINDOW(window), TRUE);
+    gtk_window_set_accept_focus(GTK_WINDOW(window), FALSE);
+    gtk_widget_set_app_paintable(window, TRUE);
+    GdkVisual *rgba = gdk_screen_get_rgba_visual(gtk_widget_get_screen(window));
+    if (rgba != nullptr) {
+        gtk_widget_set_visual(window, rgba);
+    }
+
+    WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+    webkit_user_content_manager_register_script_message_handler(ucm, "player");
+    g_signal_connect(ucm, "script-message-received::player", G_CALLBACK(onScriptMessage), player);
+    WebKitWebView *web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
+    GdkRGBA transparent = {0.0, 0.0, 0.0, 0.0};
+    webkit_web_view_set_background_color(web, &transparent);
+    WebKitSettings *wkSettings = webkit_web_view_get_settings(web);
+    webkit_settings_set_enable_write_console_messages_to_stdout(wkSettings, TRUE);
+    // Cairo rendering for reliable transparency and no GLX surface in the overlay.
+    webkit_settings_set_hardware_acceleration_policy(wkSettings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+    g_signal_connect(web, "load-changed", G_CALLBACK(onWebLoadChanged), nullptr);
+    g_signal_connect(web, "load-failed", G_CALLBACK(onWebLoadFailed), nullptr);
+    gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(web));
+    player->gtkWindow = window;
+    player->webView = web;
+
+    // Initial geometry from the host window, then realize as override-redirect so
+    // the WM doesn't decorate/manage/restack it; the timer keeps it glued.
+    gtk_widget_realize(window);
+    GdkWindow *gdkWin = gtk_widget_get_window(window);
+    gdk_window_set_override_redirect(gdkWin, TRUE);
+    Display *dpy = GDK_WINDOW_XDISPLAY(gdkWin);
+    XWindowAttributes attrs;
+    Window childRet = 0;
+    int rx = 0;
+    int ry = 0;
+    if (XGetWindowAttributes(dpy, player->hostWid, &attrs) != 0) {
+        XTranslateCoordinates(dpy, player->hostWid, attrs.root, 0, 0, &rx, &ry, &childRet);
+        gtk_window_move(GTK_WINDOW(window), rx, ry);
+        gtk_window_resize(GTK_WINDOW(window), attrs.width, attrs.height);
+    }
+    gtk_widget_show_all(window);
+    XRaiseWindow(dpy, GDK_WINDOW_XID(gdkWin));
+    XFlush(dpy);
+
+    webkit_web_view_load_uri(web, player->controlsUrl.c_str());
+    player->syncTimerId = g_timeout_add(100, onFloatingTimer, player);
+    std::fprintf(stderr, "[nuvio-player] floating overlay at %d,%d %dx%d over host wid=%lu\n",
+                 rx, ry, attrs.width, attrs.height, player->hostWid);
 }
 
 // ---- track-list (audio/subtitle) JSON ------------------------------------
@@ -569,7 +846,11 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     env->GetJavaVM(&player->jvm);
     player->hostWid = static_cast<unsigned long>(hostViewPtr);
     player->controlsUrl = jstringToUtf8(env, controlsPageUrl);
+    // Linux renders in software into a Compose Canvas (the only path that avoids
+    // the native-window + overlay compositing problems). It is the default; the
+    // env vars below remain only for comparing the abandoned approaches.
     player->renderMode = (std::getenv("NUVIO_LINUX_RENDER") != nullptr);
+    player->swMode = !player->renderMode && (std::getenv("NUVIO_LINUX_WID") == nullptr);
     if (eventSink != nullptr) {
         player->eventSink = env->NewGlobalRef(eventSink);
         jclass sinkClass = env->GetObjectClass(eventSink);
@@ -609,8 +890,8 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
         mpv_set_option_string(mpv, "vd-lavc-software-fallback", "yes");
     }
     mpv_set_option_string(mpv, "force-window", "no");
-    if (player->renderMode) {
-        // Render API: mpv renders into our GtkGLArea's GL context (no own window).
+    if (player->swMode || player->renderMode) {
+        // libmpv VO: we drive rendering via the render API (SW buffer or GL FBO).
         mpv_set_option_string(mpv, "vo", "libmpv");
     } else {
         mpv_set_option_string(mpv, "vo", "gpu-next");
@@ -618,6 +899,10 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
         // would create its own wl_surface and ignore wid; force an X11 GLX context
         // (EGL fails to make its context current on the foreign AWT window).
         mpv_set_option_string(mpv, "gpu-context", "x11");
+        // Don't block on vsync: when the controls overlay occludes the mpv window,
+        // the compositor stops frame callbacks and a vsync-locked swap stalls.
+        mpv_set_option_string(mpv, "opengl-swapinterval", "0");
+        mpv_set_option_string(mpv, "video-sync", "audio");
     }
 
     // Initial playback state, applied to the first loaded file. Set as options
@@ -655,7 +940,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     // LinuxAwtViewResolver.getWindow()). Render mode embeds via the GtkGLArea
     // instead, so wid is only set for the direct-embedding path.
     int64_t wid = static_cast<int64_t>(hostViewPtr);
-    if (!player->renderMode) {
+    if (!player->renderMode && !player->swMode) {
         mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &wid);
     }
 
@@ -673,6 +958,19 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     // Surface mpv warnings/errors to the run console for diagnostics.
     mpv_request_log_messages(mpv, "warn");
 
+    if (player->swMode) {
+        mpv_render_param swParams[] = {
+            {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_SW)},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        if (mpv_render_context_create(&player->renderCtx, mpv, swParams) < 0) {
+            std::fprintf(stderr, "[nuvio-player] SW render context create failed\n");
+            player->renderCtx = nullptr;
+        } else {
+            std::fprintf(stderr, "[nuvio-player] SW render context created\n");
+        }
+    }
+
     // Start draining events before we load.
     player->running.store(true);
     player->eventThread = std::thread(runEventLoop, player);
@@ -688,7 +986,10 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
 
     // Set up the GTK-side window. Re-check liveness on the GTK thread in case
     // dispose() raced ahead before the task ran.
-    if (player->renderMode) {
+    if (player->swMode) {
+        // No GTK window: Kotlin pulls frames via renderFrame() and draws them in a
+        // Compose Canvas; the shared Compose PlayerControlsShell draws over them.
+    } else if (player->renderMode) {
         // Render-API path: mpv renders into a GtkGLArea embedded in the AWT window.
         runOnGtk([player]() {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -697,13 +998,13 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
             }
         });
     } else {
-        // Legacy child-reparent overlay (broken; see NUVIO_LINUX_OVERLAY notes).
+        // wid-embedded video + a floating top-level controls overlay glued over it.
         static const bool overlayEnabled = std::getenv("NUVIO_LINUX_OVERLAY") != nullptr;
         if (overlayEnabled && !player->controlsUrl.empty()) {
             runOnGtk([player]() {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_live.count(player) != 0) {
-                    createOverlayOnGtk(player);
+                    createFloatingOverlayOnGtk(player);
                 }
             });
         }
@@ -736,12 +1037,30 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *en
         player->eventSink = nullptr;
     }
 
+    if (player->swMode) {
+        // SW render context has no GL resources; free it here, then mpv.
+        if (player->renderCtx != nullptr) {
+            mpv_render_context_free(player->renderCtx);
+            player->renderCtx = nullptr;
+        }
+        if (player->mpv != nullptr) {
+            mpv_terminate_destroy(player->mpv);
+            player->mpv = nullptr;
+        }
+        delete player;
+        return;
+    }
+
     if (player->renderMode) {
         // Render context + mpv must be torn down on the GTK thread (GL owner):
         // render_context_free before terminate_destroy, and the window destroyed
         // last so no further render callback touches the instance. The GTK task
         // owns the instance and frees it.
         runOnGtk([player]() {
+            if (player->syncTimerId != 0) {
+                g_source_remove(player->syncTimerId);
+                player->syncTimerId = 0;
+            }
             if (player->glArea != nullptr) {
                 gtk_gl_area_make_current(GTK_GL_AREA(player->glArea));
             }
@@ -764,8 +1083,12 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *en
         return;
     }
 
-    // Legacy wid / child-overlay path: destroy the overlay window (if any) on the
-    // GTK thread, then terminate mpv here.
+    // wid path: stop the floating overlay timer and destroy its window (if any)
+    // on the GTK thread, then terminate mpv here.
+    if (player->syncTimerId != 0) {
+        g_source_remove(player->syncTimerId);
+        player->syncTimerId = 0;
+    }
     GtkWidget *overlay = player->gtkWindow;
     player->gtkWindow = nullptr;
     player->webView = nullptr;
@@ -914,6 +1237,38 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_speed(JNIEnv *, jo
     return static_cast<jfloat>(getDouble(player->mpv, "speed", 1.0));
 }
 
+// ---- Software-render frame pull (Compose) ---------------------------------
+// Renders the current mpv frame into the caller's direct ByteBuffer as RGBA8888.
+// Returns true if a frame was rendered. Kotlin draws it in a Compose Canvas.
+
+JNIEXPORT jboolean JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_renderFrame(
+    JNIEnv *env, jobject, jlong handle, jint width, jint height, jobject buffer) {
+    if (width <= 0 || height <= 0 || buffer == nullptr) {
+        return JNI_FALSE;
+    }
+    void *dst = env->GetDirectBufferAddress(buffer);
+    if (dst == nullptr) {
+        return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    if (player == nullptr || player->renderCtx == nullptr) {
+        return JNI_FALSE;
+    }
+    int size[2] = {static_cast<int>(width), static_cast<int>(height)};
+    size_t stride = static_cast<size_t>(width) * 4;
+    char swFormat[] = "rgba"; // bytes R,G,B,A -> Skia ColorType.RGBA_8888
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_SW_SIZE, size},
+        {MPV_RENDER_PARAM_SW_FORMAT, swFormat},
+        {MPV_RENDER_PARAM_SW_STRIDE, &stride},
+        {MPV_RENDER_PARAM_SW_POINTER, dst},
+        {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+    return mpv_render_context_render(player->renderCtx, params) >= 0 ? JNI_TRUE : JNI_FALSE;
+}
+
 // ---- Track enumeration ----------------------------------------------------
 
 JNIEXPORT jstring JNICALL
@@ -1038,23 +1393,23 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_applySubtitleStyle
 
 JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_updateControls(JNIEnv *env, jobject, jlong handle, jstring controlsJson) {
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        PlayerInstance *player = liveLocked(handle);
-        if (player == nullptr || player->webView == nullptr) {
-            return;
-        }
+    const std::string json = jstringToUtf8(env, controlsJson);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    PlayerInstance *player = liveLocked(handle);
+    if (player == nullptr) {
+        return;
     }
-    auto *player = reinterpret_cast<PlayerInstance *>(handle);
-    const std::string script = "window.playerUpdate(" + jstringToUtf8(env, controlsJson) + ");";
-    runOnGtk([player, script]() {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_live.count(player) == 0 || player->webView == nullptr) {
-            return;
-        }
-        webkit_web_view_evaluate_javascript(player->webView, script.c_str(), -1,
-                                            nullptr, nullptr, nullptr, nullptr, nullptr);
-    });
+    // Cache the latest structural state. If the page is ready, flush now; if not
+    // (it loads asynchronously), controlsReady will flush it later.
+    player->pendingControlsJson = json;
+    if (player->webView != nullptr && player->controlsReady) {
+        runOnGtk([player]() {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_live.count(player) != 0) {
+                flushControlsOnGtk(player);
+            }
+        });
+    }
 }
 
 JNIEXPORT void JNICALL

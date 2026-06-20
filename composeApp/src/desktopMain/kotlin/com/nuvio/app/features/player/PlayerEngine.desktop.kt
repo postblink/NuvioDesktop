@@ -47,10 +47,25 @@ actual fun PlatformPlayerSurface(
     onSnapshot: (PlayerPlaybackSnapshot) -> Unit,
     onError: (String?) -> Unit,
 ) {
+    if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+        val playerSettings by PlayerSettingsRepository.uiState.collectAsState()
+        LinuxComposePlayerSurface(
+            sourceUrl = sourceUrl,
+            sourceHeaders = sourceHeaders,
+            modifier = modifier,
+            playWhenReady = playWhenReady,
+            resizeMode = resizeMode,
+            initialPositionMs = initialPositionMs,
+            decoderPriority = playerSettings.decoderPriority,
+            onControllerReady = onControllerReady,
+            onSnapshot = onSnapshot,
+            onError = onError,
+        )
+        return
+    }
     if (
         DesktopHostOs.current == DesktopHostOs.MACOS ||
-        DesktopHostOs.current == DesktopHostOs.WINDOWS ||
-        DesktopHostOs.current == DesktopHostOs.LINUX
+        DesktopHostOs.current == DesktopHostOs.WINDOWS
     ) {
         NativePlayerSurface(
             sourceUrl = sourceUrl,
