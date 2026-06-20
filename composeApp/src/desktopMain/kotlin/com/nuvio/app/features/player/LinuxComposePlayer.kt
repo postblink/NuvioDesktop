@@ -24,6 +24,9 @@ import com.nuvio.app.features.player.desktop.toggleDesktopAppFullscreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
@@ -151,6 +154,44 @@ private fun Map<String, String>.toHeaderLines(): List<String> =
         if (cleanKey.isBlank() || cleanValue.isBlank()) null else "$cleanKey: $cleanValue"
     }
 
+@Serializable
+private data class NativeMpvTrack(
+    val index: Int = 0,
+    val id: String = "",
+    val label: String = "",
+    val language: String = "",
+    val selected: Boolean = false,
+    val forced: Boolean = false,
+)
+
+private fun resolveTrackId(index: Int, tracks: List<NativeMpvTrack>): Int? =
+    tracks.firstNotNullOfOrNull { track ->
+        if (track.index == index) track.id.toIntOrNull() else null
+    } ?: tracks.getOrNull(index)?.id?.toIntOrNull()
+
+private fun Color.toMpvColorString(): String = buildString {
+    append('#')
+    append((alpha * 255f).toInt().toHexByte())
+    append((red * 255f).toInt().toHexByte())
+    append((green * 255f).toInt().toHexByte())
+    append((blue * 255f).toInt().toHexByte())
+}
+
+private fun SubtitleStyleState.toMpvSubtitlePosition(): Int =
+    (100 - (bottomOffset / 2)).coerceIn(0, 150)
+
+private fun SubtitleStyleState.toMpvSubtitleFontSize(): Float =
+    (fontSizeSp * 3f).coerceIn(18f, 96f)
+
+private fun Int.toHexByte(): String {
+    val digits = "0123456789ABCDEF"
+    val value = coerceIn(0, 255)
+    return buildString {
+        append(digits[value / 16])
+        append(digits[value % 16])
+    }
+}
+
 private class LinuxComposePlayerController : PlayerEngineController {
     @Volatile
     private var handle: Long = 0L
@@ -246,16 +287,53 @@ private class LinuxComposePlayerController : PlayerEngineController {
         handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSpeed(it, speed) }
     }
 
-    override fun getAudioTracks(): List<AudioTrack> = emptyList()
+    private val json = Json { ignoreUnknownKeys = true }
 
-    override fun getSubtitleTracks(): List<SubtitleTrack> = emptyList()
+    private fun decodeTracks(jsonText: String): List<NativeMpvTrack> =
+        runCatching { json.decodeFromString<List<NativeMpvTrack>>(jsonText) }.getOrDefault(emptyList())
+
+    override fun getAudioTracks(): List<AudioTrack> {
+        val current = handle.takeIf { it != 0L } ?: return emptyList()
+        return decodeTracks(NativePlayerBridge.audioTracksJson(current)).map { track ->
+            AudioTrack(
+                index = track.index,
+                id = track.id,
+                label = track.label,
+                language = track.language.takeUnless(String::isBlank),
+                isSelected = track.selected,
+            )
+        }
+    }
+
+    override fun getSubtitleTracks(): List<SubtitleTrack> {
+        val current = handle.takeIf { it != 0L } ?: return emptyList()
+        return decodeTracks(NativePlayerBridge.subtitleTracksJson(current)).map { track ->
+            SubtitleTrack(
+                index = track.index,
+                id = track.id,
+                label = track.label,
+                language = track.language.takeUnless(String::isBlank),
+                isSelected = track.selected,
+                isForced = track.forced ||
+                    inferForcedSubtitleTrack(track.label, track.language, track.id),
+            )
+        }
+    }
 
     override fun selectAudioTrack(index: Int) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.selectAudioTrack(it, index) }
+        val current = handle.takeIf { it != 0L } ?: return
+        val trackId = resolveTrackId(index, decodeTracks(NativePlayerBridge.audioTracksJson(current))) ?: return
+        NativePlayerBridge.selectAudioTrack(current, trackId)
     }
 
     override fun selectSubtitleTrack(index: Int) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.selectSubtitleTrack(it, index) }
+        val current = handle.takeIf { it != 0L } ?: return
+        if (index < 0) {
+            NativePlayerBridge.selectSubtitleTrack(current, -1)
+            return
+        }
+        val trackId = resolveTrackId(index, decodeTracks(NativePlayerBridge.subtitleTracksJson(current))) ?: return
+        NativePlayerBridge.selectSubtitleTrack(current, trackId)
     }
 
     override fun setSubtitleUri(url: String) {
@@ -267,10 +345,30 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun clearExternalSubtitleAndSelect(trackIndex: Int) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.clearExternalSubtitlesAndSelect(it, trackIndex) }
+        val current = handle.takeIf { it != 0L } ?: return
+        val trackId = if (trackIndex < 0) {
+            -1
+        } else {
+            resolveTrackId(trackIndex, decodeTracks(NativePlayerBridge.subtitleTracksJson(current))) ?: return
+        }
+        NativePlayerBridge.clearExternalSubtitlesAndSelect(current, trackId)
     }
 
     override fun setSubtitleDelayMs(delayMs: Int) {
         handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSubtitleDelayMs(it, delayMs) }
+    }
+
+    override fun applySubtitleStyle(style: SubtitleStyleState) {
+        val current = handle.takeIf { it != 0L } ?: return
+        NativePlayerBridge.applySubtitleStyle(
+            handle = current,
+            textColor = style.textColor.toMpvColorString(),
+            backgroundColor = style.backgroundColor.toMpvColorString(),
+            outlineColor = style.outlineColor.toMpvColorString(),
+            outlineSize = if (style.outlineEnabled) style.outlineWidth.toFloat() else 0f,
+            bold = style.bold,
+            fontSize = style.toMpvSubtitleFontSize(),
+            subPos = style.toMpvSubtitlePosition(),
+        )
     }
 }

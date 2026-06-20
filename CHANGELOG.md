@@ -24,6 +24,11 @@ the Linux-specific work layered on top.
 - Gradle `buildLinuxPlayerBridge` task (g++ + `pkg-config mpv`, `$ORIGIN` rpath), with
   `desktopJar` bundling and run/package task wiring.
 - `--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED` for the X11 peer reflection.
+- Audio/subtitle **track pickers** and subtitle **styling** wired into the Compose Linux path
+  (`LinuxComposePlayer.kt`): `getAudioTracks`/`getSubtitleTracks` decode the bridge's track
+  JSON, `selectAudioTrack`/`selectSubtitleTrack` resolve the picker index to an mpv track id,
+  and `applySubtitleStyle` maps `SubtitleStyleState` (color, opacity, font size, position) to
+  mpv subtitle properties.
 
 ### Fixed
 - Linux was routed to the "in-app playback not available" stub instead of the native player.
@@ -35,10 +40,12 @@ the Linux-specific work layered on top.
 - Black video / audio-only: EGL couldn't make its GL context current on the foreign AWT
   window — switched the GPU context to **GLX**.
 - Black artifacting from AWT repainting over the mpv surface (Linux-gated `ignoreRepaint`).
+- Subtitle Style panel showed no selected-swatch highlight once Text Opacity was changed:
+  `Color` equality is alpha-sensitive, so a stored color with custom alpha never matched the
+  opaque swatches. Selection now compares hue only, and the selected swatch is enlarged with a
+  thicker accent ring so the active color is unmistakable (shared UI — benefits all platforms).
 
 ### Known gaps / Linux caveats
-- Audio/subtitle **track pickers** and subtitle **styling** not yet wired in the Compose path
-  (`getAudioTracks`/`getSubtitleTracks` stubbed; the bridge already produces the track JSON).
 - Software rendering is **CPU-composited** (hwdec still decodes in hardware) — fine for 1080p,
   heavier for 4K than the GPU path on Windows/macOS.
 - **AppImage** packaging pending; desktop fullscreen/chrome niceties unverified on Linux.

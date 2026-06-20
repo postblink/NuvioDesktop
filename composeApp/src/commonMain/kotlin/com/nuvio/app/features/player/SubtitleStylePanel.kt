@@ -456,14 +456,16 @@ private fun ColorPickerRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             colors.forEach { color ->
-                val isSelected = selectedColor == color
+                // Compare hue only: the stored color may carry a custom alpha (text
+                // opacity), which must not hide the selected swatch's highlight.
+                val isSelected = selectedColor.copy(alpha = 1f) == color.copy(alpha = 1f)
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(if (isSelected) 26.dp else 22.dp)
                         .clip(CircleShape)
                         .background(if (color.alpha == 0f) colorScheme.surface else color)
                         .border(
-                            2.dp,
+                            if (isSelected) 3.dp else 1.dp,
                             if (isSelected) colorScheme.primary else colorScheme.outlineVariant,
                             CircleShape,
                         )
