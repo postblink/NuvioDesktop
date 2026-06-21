@@ -39,6 +39,7 @@ import com.nuvio.app.features.watchprogress.buildPlaybackVideoId
 import com.nuvio.app.features.watching.application.WatchingState
 import com.nuvio.app.isDesktop
 import com.nuvio.app.isIos
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -51,6 +52,15 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
     val keyboardFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         if (isDesktop) runCatching { keyboardFocus.requestFocus() }
+    }
+    // A fullscreen transition recreates the AWT peer and drops the Compose focus node,
+    // so keyboard shortcuts (F/Esc/Space) stop reaching handlePlayerKey until the user
+    // clicks. Re-request focus whenever the fullscreen state flips.
+    LaunchedEffect(isFullscreen) {
+        if (isDesktop) {
+            delay(120)
+            runCatching { keyboardFocus.requestFocus() }
+        }
     }
     val displayedPositionMs = scrubbingPositionMs ?: playbackSnapshot.positionMs
     val seasonNumber = activeSeasonNumber
@@ -411,6 +421,7 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
                 onSnapshot = { snapshot ->
                     playbackSnapshot = snapshot
                     if (!snapshot.isLoading) initialLoadCompleted = true
+                    if (isDesktop) syncFullscreenFromHost()
                     if (snapshot.isEnded) {
                         shouldPlay = false
                         controlsVisible = !playerControlsLocked
@@ -473,14 +484,12 @@ private fun PlayerScreenRuntime.handlePlayerKey(event: KeyEvent): Boolean {
         Key.DirectionLeft -> { seekBy(-10_000L); true }
         Key.DirectionRight -> { seekBy(10_000L); true }
         Key.F -> {
-            isFullscreen = !isFullscreen
-            playerController?.toggleFullscreen()
+            toggleHostFullscreen()
             true
         }
         Key.Escape -> {
-            if (isFullscreen) {
-                isFullscreen = false
-                playerController?.toggleFullscreen()
+            if (hostWindowIsFullscreen()) {
+                toggleHostFullscreen()
                 true
             } else {
                 false
@@ -488,6 +497,24 @@ private fun PlayerScreenRuntime.handlePlayerKey(event: KeyEvent): Boolean {
         }
         else -> false
     }
+}
+
+// The real host-window fullscreen state is the single source of truth (it can be changed
+// out-of-band by F11 / the OS), so query the controller rather than the cached flag.
+private fun PlayerScreenRuntime.hostWindowIsFullscreen(): Boolean =
+    playerController?.isHostFullscreen() ?: isFullscreen
+
+// Toggle the host window and re-sync the cached `isFullscreen` flag (drives the pill glyph).
+private fun PlayerScreenRuntime.toggleHostFullscreen() {
+    playerController?.toggleFullscreen()
+    syncFullscreenFromHost()
+}
+
+// Reconcile the cached flag with the actual window placement; cheap no-op when unchanged.
+private fun PlayerScreenRuntime.syncFullscreenFromHost() {
+    val controller = playerController ?: return
+    val actual = controller.isHostFullscreen()
+    if (actual != isFullscreen) isFullscreen = actual
 }
 
 @Composable
@@ -579,10 +606,7 @@ private fun PlayerScreenRuntime.RenderPlayerControls(displayedPositionMs: Long, 
                 null
             },
             onFullscreenClick = if (isDesktop) {
-                {
-                    isFullscreen = !isFullscreen
-                    playerController?.toggleFullscreen()
-                }
+                { toggleHostFullscreen() }
             } else {
                 null
             },

@@ -56,12 +56,23 @@ internal fun isDesktopAppFullscreen(window: Window? = null): Boolean =
 internal class DesktopAppFullscreenController {
     private var restoreWindowPlacement = WindowPlacement.Floating
     private var windowsFullscreenState: WindowsFullscreenState? = null
+    // On Linux, `windowState.placement` is unreliable: the WM/Compose writes it back to
+    // Maximized/Floating after the transition even though the window stays visually
+    // fullscreen. Track the intended state ourselves so toggle/query stay in sync.
+    private var composeFullscreenActive = false
 
     fun toggle(window: Window, windowState: WindowState) {
         if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
             toggleWindowsFullscreen(window)
         } else {
             toggleComposeFullscreen(windowState)
+            // The Compose fullscreen transition recreates the AWT window peer and drops
+            // keyboard focus, which silently breaks in-player key shortcuts (F/Esc/Space)
+            // until the user clicks. Re-assert window focus once the change is applied.
+            SwingUtilities.invokeLater {
+                window.toFront()
+                window.requestFocus()
+            }
         }
     }
 
@@ -70,20 +81,29 @@ internal class DesktopAppFullscreenController {
     }
 
     fun isFullscreen(window: Window, windowState: WindowState): Boolean =
-        if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
-            windowsFullscreenState?.window === window
-        } else {
-            windowState.placement == WindowPlacement.Fullscreen
+        when (DesktopHostOs.current) {
+            DesktopHostOs.WINDOWS -> windowsFullscreenState?.window === window
+            // Linux: trust our own flag, not the racy placement write-back.
+            DesktopHostOs.LINUX -> composeFullscreenActive
+            // macOS: native fullscreen reliably reflects back into placement.
+            else -> windowState.placement == WindowPlacement.Fullscreen
         }
 
     private fun toggleComposeFullscreen(windowState: WindowState) {
-        if (windowState.placement == WindowPlacement.Fullscreen) {
+        val currentlyFullscreen = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            composeFullscreenActive
+        } else {
+            windowState.placement == WindowPlacement.Fullscreen
+        }
+        if (currentlyFullscreen) {
             windowState.placement = restoreWindowPlacement
+            composeFullscreenActive = false
         } else {
             restoreWindowPlacement = windowState.placement
                 .takeUnless { it == WindowPlacement.Fullscreen }
                 ?: WindowPlacement.Floating
             windowState.placement = WindowPlacement.Fullscreen
+            composeFullscreenActive = true
         }
     }
 

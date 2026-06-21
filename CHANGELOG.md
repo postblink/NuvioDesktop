@@ -45,6 +45,15 @@ the Linux-specific work layered on top.
   mpv subtitle properties.
 
 ### Fixed
+- Linux fullscreen exit was unreliable (Esc/F/pill sometimes failed; Esc often backed out of
+  the player instead). Three stacked causes: the player tracked its own `isFullscreen` flag
+  that F11 (the global key dispatcher) never updated; `WindowPlacement.Fullscreen` is written
+  back to Maximized/Floating by the WM after the transition, so state checks read false; and
+  the transition recreates the AWT window peer, dropping keyboard focus so F/Esc/Space stopped
+  reaching the player. Now `DesktopAppFullscreenController` owns the Linux fullscreen state,
+  every input (F, Esc, pill, F11) resolves against one source of truth via a new
+  `PlayerEngineController.isHostFullscreen()`, and window focus is re-asserted after each
+  toggle. (macOS/Windows keep their native placement path.)
 - Linux was routed to the "in-app playback not available" stub instead of the native player.
 - Player never attached: heavyweight AWT `Canvas` in a Compose `SwingPanel` doesn't reliably
   receive `paint()` on X11 — first-paint notification now also fires from resize/show events.

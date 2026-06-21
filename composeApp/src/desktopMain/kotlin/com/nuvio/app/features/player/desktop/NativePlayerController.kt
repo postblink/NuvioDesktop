@@ -305,6 +305,15 @@ internal class NativePlayerController(
         )
     }
 
+    override fun toggleFullscreen() {
+        toggleDesktopAppFullscreen(SwingUtilities.getWindowAncestor(host))
+        lastSentControlsStructureKey = null
+        updateControls(controlsState)
+    }
+
+    override fun isHostFullscreen(): Boolean =
+        isDesktopAppFullscreen(SwingUtilities.getWindowAncestor(host))
+
     override fun setPlaybackSpeed(speed: Float) {
         handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSpeed(it, speed) }
     }

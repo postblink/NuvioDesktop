@@ -13,6 +13,8 @@ interface PlayerEngineController {
     fun setMuted(muted: Boolean) {}
     /** Toggle the host window's fullscreen state (desktop). No-op on platforms that don't apply. */
     fun toggleFullscreen() {}
+    /** True when the host window is currently fullscreen (desktop). False where not applicable. */
+    fun isHostFullscreen(): Boolean = false
     fun getAudioTracks(): List<AudioTrack>
     fun getSubtitleTracks(): List<SubtitleTrack>
     fun selectAudioTrack(index: Int)
