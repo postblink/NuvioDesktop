@@ -247,6 +247,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     jlong initialPositionMs,
     jstring /* controlsPageUrl */,
     jint decoderPriority,
+    jboolean /* nvidiaRtxSuperResolutionEnabled */, // VSR is Windows-only; ignored here
     jobject /* eventSink */) {
 
     const std::string url = jstringToUtf8(env, sourceUrl);
@@ -453,12 +454,36 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_adjustVolume(JNIEn
 }
 
 JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setVolume(JNIEnv *, jobject, jlong handle, jfloat level) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    if (player == nullptr) return;
+    double volume = static_cast<double>(level);
+    if (volume < 0.0) volume = 0.0;
+    if (volume > 130.0) volume = 130.0;
+    setDouble(player->mpv, "volume", volume);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_volume(JNIEnv *, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    return player == nullptr ? 100.0f : static_cast<jfloat>(getDouble(player->mpv, "volume", 100.0));
+}
+
+JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setResizeMode(JNIEnv *, jobject, jlong handle, jint mode) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto *player = liveLocked(handle);
     if (player == nullptr) return;
-    // 0 = Fit (letterbox), 1 = Fill, 2 = Zoom.
-    mpv_set_property_string(player->mpv, "panscan", mode == 0 ? "0.0" : "1.0");
+    // 0 = Fit (letterbox), 1 = Fill, 2 = Zoom, 3 = Stretch (ignore aspect ratio).
+    if (mode == 3) {
+        mpv_set_property_string(player->mpv, "keepaspect", "no");
+        mpv_set_property_string(player->mpv, "panscan", "0.0");
+    } else {
+        mpv_set_property_string(player->mpv, "keepaspect", "yes");
+        mpv_set_property_string(player->mpv, "panscan", mode == 0 ? "0.0" : "1.0");
+    }
 }
 
 // ---- state queries --------------------------------------------------------

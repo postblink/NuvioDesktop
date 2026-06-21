@@ -213,6 +213,8 @@ private class LinuxComposePlayerController : PlayerEngineController {
             initialPositionMs = initialPositionMs,
             controlsPageUrl = "",
             decoderPriority = decoderPriority,
+            // VSR is a Windows/DirectX feature; the Linux software path ignores it.
+            nvidiaRtxSuperResolutionEnabled = false,
             eventSink = noOpSink,
         )
     }
@@ -250,6 +252,7 @@ private class LinuxComposePlayerController : PlayerEngineController {
                     PlayerResizeMode.Fit -> 0
                     PlayerResizeMode.Fill -> 1
                     PlayerResizeMode.Zoom -> 2
+                    PlayerResizeMode.Stretch -> 3
                 },
             )
         }
