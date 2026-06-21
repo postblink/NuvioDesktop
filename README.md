@@ -23,6 +23,8 @@
 > aiming to stay as faithful as possible to the official upstream branch. It tracks
 > [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and is intended as a
 > stopgap until an official Linux release lands, at which point this port defers to it.
+>
+> 📥 **Download the latest Linux AppImage:** [postblink/NuvioDesktop releases](https://github.com/postblink/NuvioDesktop/releases/latest).
 
 ## About
 
