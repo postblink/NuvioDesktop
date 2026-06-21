@@ -4,6 +4,22 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.8-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (22 commits). Adopted upstream desktop fixes: player **arrow-key
+  handling**, **episode stream rows**, and **addon URL encoding**; the detail/meta redesign
+  (wide cast & production layouts, `DesktopDetailHero`, reworked home hero); and stability
+  fixes — the **watch-progress concurrency crash**, multiple iOS crashes, plugin-runtime
+  dispatcher isolation, and deleted-remote-account handling. The Linux Compose player path is
+  untouched by the merge (it lives in Linux-only files).
+
+### Fixed
+- **Desktop build:** upstream's watch-progress concurrency fix uses `kotlinx.atomicfu.locks`,
+  which wasn't on the desktop compile classpath (upstream builds the mobile/web targets, so it
+  never surfaced there). Added the `kotlinx-atomicfu` dependency (`0.27.0`, aligned with
+  coroutines `1.10.2`) so `commonMain` compiles for the desktop target.
+
 ## [Unreleased] — Linux port
 
 ### Upstream sync
