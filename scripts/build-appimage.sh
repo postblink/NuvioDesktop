@@ -14,7 +14,8 @@
 #
 #   appImageDir  jpackage app-image dir, e.g. composeApp/build/compose/binaries/main/app/Nuvio
 #   outputDir    where the .AppImage is written
-#   version      package version string, used in the artifact name
+#   version      display version (e.g. 0.1.8-alpha); the artifact is named
+#                Nuvio-<version>-linux-<arch>.AppImage
 #   iconPng      path to the app icon PNG
 
 set -euo pipefail
@@ -136,7 +137,7 @@ chmod +x "$APPDIR/AppRun"
 
 # --- pack -------------------------------------------------------------------
 mkdir -p "$OUTPUT_DIR"
-out="$OUTPUT_DIR/$APP_NAME-$VERSION-$ARCH.AppImage"
+out="$OUTPUT_DIR/$APP_NAME-$VERSION-linux-$ARCH.AppImage"
 echo "build-appimage: packing $out" >&2
 # --appimage-extract-and-run avoids needing FUSE on the build host.
 ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$out"

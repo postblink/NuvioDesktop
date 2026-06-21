@@ -24,7 +24,7 @@
 > [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and is intended as a
 > stopgap until an official Linux release lands, at which point this port defers to it.
 >
-> 📥 **Download the latest Linux AppImage:** [postblink/NuvioDesktop releases](https://github.com/postblink/NuvioDesktop/releases/latest).
+> 📥 **Download the latest Linux AppImage:** [postblink/NuvioDesktop releases](https://github.com/postblink/NuvioDesktop/releases) — newest build is at the top.
 
 ## About
 
@@ -84,7 +84,7 @@ Platform-specific packaging:
 
 # Linux (AppImage) — wraps createDistributable; downloads appimagetool on first run.
 # Requires system libmpv at runtime (not bundled). Output:
-#   composeApp/build/compose/binaries/main/appimage/Nuvio-<version>-<arch>.AppImage
+#   composeApp/build/compose/binaries/main/appimage/Nuvio-<version>-linux-<arch>.AppImage
 ./gradlew :composeApp:packageLinuxAppImage
 ```
 

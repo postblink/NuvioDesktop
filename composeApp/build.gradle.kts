@@ -668,7 +668,7 @@ val packageLinuxAppImage = tasks.register<Exec>("packageLinuxAppImage") {
         script.asFile.absolutePath,
         appImageDir.get().asFile.absolutePath,
         outputDir.get().asFile.absolutePath,
-        desktopReleasePackageVersion,
+        desktopReleaseVersionName,
         icon.asFile.absolutePath,
     )
 }
