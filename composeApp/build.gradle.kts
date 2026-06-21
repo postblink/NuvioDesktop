@@ -330,6 +330,27 @@ fun jpackageCompatibleVersion(version: String): String {
     return numbers.joinToString(".")
 }
 
+// Packaging guardrail: fail fast if the backend isn't configured, so an
+// unconfigured (localhost-login) artifact can't be shipped. Implemented as a
+// typed task — not a doFirst lambda — to stay configuration-cache compatible.
+abstract class CheckBackendConfiguredTask : DefaultTask() {
+    @get:Input
+    abstract val supabaseUrl: Property<String>
+
+    @TaskAction
+    fun check() {
+        val url = supabaseUrl.get()
+        if (!url.startsWith("https://")) {
+            error(
+                "Refusing to package: SUPABASE_URL is blank/invalid (\"$url\"). " +
+                    "Account login would resolve to https://localhost and fail with 'Connection refused'. " +
+                    "Set SUPABASE_URL and SUPABASE_ANON_KEY in local.properties " +
+                    "(published for third-party clients at https://nuvio.tv/docs), then rebuild.",
+            )
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
@@ -673,27 +694,17 @@ val packageLinuxAppImage = tasks.register<Exec>("packageLinuxAppImage") {
     )
 }
 
-// Guardrail: never package a release with an unconfigured backend. A blank
-// SUPABASE_URL makes account login resolve to https://localhost (connection
-// refused) — that shipped in 0.1.6–0.1.8. Fail loudly at packaging time instead
-// of producing a broken artifact. Dev `run` is unaffected (it doesn't build a
-// distributable). Published credentials for third-party clients live at
-// https://nuvio.tv/docs and go into the gitignored local.properties.
-val packagingSupabaseUrl = runtimeConfigValue("SUPABASE_URL")
+// Packaging guardrail wiring: the jpackage distributable tasks (which the
+// AppImage and Deb builds depend on) require a configured backend. Failing here
+// blocks shipping a localhost-login artifact. Dev `run` builds no distributable,
+// so it's unaffected. Published credentials live at https://nuvio.tv/docs ->
+// the gitignored local.properties.
+val checkBackendConfigured = tasks.register<CheckBackendConfiguredTask>("checkBackendConfigured") {
+    supabaseUrl.set(runtimeConfigValue("SUPABASE_URL"))
+}
 tasks.matching {
     it.name == "createDistributable" || it.name == "createReleaseDistributable"
-}.configureEach {
-    doFirst {
-        if (!packagingSupabaseUrl.startsWith("https://")) {
-            throw GradleException(
-                "Refusing to package: SUPABASE_URL is blank/invalid (\"$packagingSupabaseUrl\"). " +
-                    "Account login would resolve to https://localhost and fail with 'Connection refused'. " +
-                    "Set SUPABASE_URL and SUPABASE_ANON_KEY in local.properties " +
-                    "(published for third-party clients at https://nuvio.tv/docs), then rebuild.",
-            )
-        }
-    }
-}
+}.configureEach { dependsOn(checkBackendConfigured) }
 
 val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
     "aarch64", "arm64" -> "arm64"
