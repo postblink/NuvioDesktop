@@ -6,6 +6,16 @@ the Linux-specific work layered on top.
 
 ## [Unreleased] — Linux port
 
+### Upstream sync
+- Merged `upstream/Dev` (now on par, **0 behind**; tracks 0.1.6-alpha). Upstream's desktop
+  fullscreen controls live in the WebView overlay (Windows/macOS), so the Linux Compose
+  fullscreen pill + keyboard handling are retained, not duplicated. Adopted upstream features:
+  NVIDIA RTX VSR (native path), `PlayerResizeMode.Stretch`, volume get/set, cursor-activity
+  callback, and the desktop subtitle font range (6..40). The Linux JNI bridge was extended to
+  match upstream's new surface: `create()` accepts (and ignores) the VSR flag, `setVolume`/
+  `volume` are implemented against mpv's `volume` property, and `Stretch` maps to
+  `keepaspect=no`.
+
 ### Player architecture (final)
 - Linux in-app playback renders **mpv frames in software into a Compose `Canvas`**
   (`NativePlayerBridge.renderFrame` + mpv's SW render API, `LinuxComposePlayer.kt`), with the
