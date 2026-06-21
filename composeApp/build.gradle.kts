@@ -605,7 +605,7 @@ val buildMacosPlayerBridge = tasks.register<Exec>("buildMacosPlayerBridge") {
     commandLine(macosPlayerBridgeCommand)
 }
 
-// --- Linux player bridge (libmpv via system pkg-config; X11/WebKitGTK later) ---
+// --- Linux player bridge (software-render libmpv via system pkg-config) ---
 val linuxPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/linux/player_bridge.cpp")
 val linuxPlayerBridgeOutput = layout.buildDirectory.file("native/linux/libplayer_bridge.so")
 val linuxPlayerBridgeSourceFile = linuxPlayerBridgeSource.asFile
@@ -625,7 +625,7 @@ val linuxPlayerBridgeCommand = listOf(
     PKGS='mpv'
     for pkg in ${'$'}PKGS; do
       if ! pkg-config --exists "${'$'}pkg"; then
-        echo "Linux player bridge: missing dev package '${'$'}pkg' (pkg-config). Install it (e.g. mpv, gtk3, webkit2gtk-4.1)." >&2
+        echo "Linux player bridge: missing dev package '${'$'}pkg' (pkg-config). Install libmpv development files (e.g. 'mpv'/'libmpv-dev')." >&2
         exit 1
       fi
     done
@@ -646,6 +646,31 @@ val buildLinuxPlayerBridge = tasks.register<Exec>("buildLinuxPlayerBridge") {
     inputs.file(linuxPlayerBridgeSource)
     outputs.file(linuxPlayerBridgeOutput)
     commandLine(linuxPlayerBridgeCommand)
+}
+
+// Packages the jpackage app image (createDistributable) into an AppImage.
+// libmpv is resolved from the host at runtime (not bundled); see CHANGELOG/README.
+val packageLinuxAppImage = tasks.register<Exec>("packageLinuxAppImage") {
+    group = "compose desktop"
+    description = "Bundles the Linux app image into an AppImage (requires system libmpv at runtime)."
+    enabled = isLinuxHost
+    notCompatibleWithConfigurationCache("Runs jpackage app-image + appimagetool for Linux.")
+    dependsOn("createDistributable")
+    val appImageDir = layout.buildDirectory.dir("compose/binaries/main/app/Nuvio")
+    val outputDir = layout.buildDirectory.dir("compose/binaries/main/appimage")
+    val script = rootProject.layout.projectDirectory.file("scripts/build-appimage.sh")
+    val icon = layout.projectDirectory.file("src/desktopMain/resources/icons/nuvio-app-icon.png")
+    inputs.dir(appImageDir)
+    inputs.file(script)
+    outputs.dir(outputDir)
+    commandLine(
+        "bash",
+        script.asFile.absolutePath,
+        appImageDir.get().asFile.absolutePath,
+        outputDir.get().asFile.absolutePath,
+        desktopReleasePackageVersion,
+        icon.asFile.absolutePath,
+    )
 }
 
 val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {

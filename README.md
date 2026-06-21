@@ -36,7 +36,12 @@ Release packages are provided for supported desktop platforms:
 
 - Windows: MSI installer
 - macOS: DMG installer
-- Linux: DEB package, when available
+- Linux: DEB package or AppImage, when available
+
+> [!IMPORTANT]
+> **Linux runtime dependency:** in-app playback uses **libmpv**, which is not bundled.
+> Install your distro's mpv/libmpv package before running (e.g. `mpv` / `libmpv2` /
+> `libmpv-dev`). The app resolves `libmpv.so.2` from the system at runtime.
 
 ## Development
 
@@ -72,8 +77,13 @@ Platform-specific packaging:
 # macOS
 ./scripts/build-macos-release-dmgs.sh --package-only
 
-# Linux
+# Linux (DEB)
 ./gradlew :composeApp:packageReleaseDeb
+
+# Linux (AppImage) — wraps createDistributable; downloads appimagetool on first run.
+# Requires system libmpv at runtime (not bundled). Output:
+#   composeApp/build/compose/binaries/main/appimage/Nuvio-<version>-<arch>.AppImage
+./gradlew :composeApp:packageLinuxAppImage
 ```
 
 ## Project Structure

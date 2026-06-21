@@ -586,7 +586,8 @@ private fun ProgressControls(
                     }
                     if (onFullscreenClick != null) {
                         PlayerActionPillButton(
-                            label = if (isFullscreen) "Exit" else "Fullscreen",
+                            label = if (isFullscreen) stringResource(Res.string.compose_player_exit_fullscreen)
+                            else stringResource(Res.string.compose_player_fullscreen),
                             icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
                             onClick = onFullscreenClick,
                         )

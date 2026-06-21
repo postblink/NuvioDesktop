@@ -24,6 +24,10 @@ the Linux-specific work layered on top.
 - Gradle `buildLinuxPlayerBridge` task (g++ + `pkg-config mpv`, `$ORIGIN` rpath), with
   `desktopJar` bundling and run/package task wiring.
 - `--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED` for the X11 peer reflection.
+- **AppImage packaging**: `packageLinuxAppImage` Gradle task wraps the jpackage app image
+  (`createDistributable`) into a portable AppImage via `scripts/build-appimage.sh`
+  (downloads/caches `appimagetool`, builds the AppDir + `.desktop` + `AppRun`). libmpv is
+  resolved from the host at runtime, not bundled — the README documents the dependency.
 - Audio/subtitle **track pickers** and subtitle **styling** wired into the Compose Linux path
   (`LinuxComposePlayer.kt`): `getAudioTracks`/`getSubtitleTracks` decode the bridge's track
   JSON, `selectAudioTrack`/`selectSubtitleTrack` resolve the picker index to an mpv track id,
@@ -48,5 +52,5 @@ the Linux-specific work layered on top.
 ### Known gaps / Linux caveats
 - Software rendering is **CPU-composited** (hwdec still decodes in hardware) — fine for 1080p,
   heavier for 4K than the GPU path on Windows/macOS.
-- **AppImage** packaging pending; desktop fullscreen/chrome niceties unverified on Linux.
-- Dead code from the abandoned overlay approaches remains in the bridge (cleanup pending).
+- The AppImage requires **system libmpv** (`libmpv.so.2`) on the target machine; it is not
+  bundled. A fully self-contained AppImage (bundled libmpv + codecs) is a possible follow-up.
