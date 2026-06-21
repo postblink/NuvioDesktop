@@ -4,6 +4,21 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.9-alpha] — Linux
+
+### Fixed
+- **Account login (hotfix).** Releases 0.1.6–0.1.8 shipped with an empty backend
+  config, so sign-in resolved to `https://localhost/auth/v1/token` and failed with
+  "Connection refused." The build now supplies Nuvio's hosted backend URL and the
+  **publishable** client key — values Nuvio publishes for third-party clients at
+  <https://nuvio.tv/docs> — via the gitignored `local.properties`. Verified against the
+  live backend (`health-check` OK; auth endpoint reachable; session loads from storage).
+
+### Build
+- **Packaging guardrail.** `createDistributable` / `createReleaseDistributable` now fail
+  fast when `SUPABASE_URL` is blank, so an unconfigured (localhost-login) artifact can no
+  longer be packaged or shipped. Dev `run` is unaffected.
+
 ## [0.1.8-alpha] — Linux
 
 ### Upstream sync

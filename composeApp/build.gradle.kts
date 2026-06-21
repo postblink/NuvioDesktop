@@ -673,6 +673,28 @@ val packageLinuxAppImage = tasks.register<Exec>("packageLinuxAppImage") {
     )
 }
 
+// Guardrail: never package a release with an unconfigured backend. A blank
+// SUPABASE_URL makes account login resolve to https://localhost (connection
+// refused) — that shipped in 0.1.6–0.1.8. Fail loudly at packaging time instead
+// of producing a broken artifact. Dev `run` is unaffected (it doesn't build a
+// distributable). Published credentials for third-party clients live at
+// https://nuvio.tv/docs and go into the gitignored local.properties.
+val packagingSupabaseUrl = runtimeConfigValue("SUPABASE_URL")
+tasks.matching {
+    it.name == "createDistributable" || it.name == "createReleaseDistributable"
+}.configureEach {
+    doFirst {
+        if (!packagingSupabaseUrl.startsWith("https://")) {
+            throw GradleException(
+                "Refusing to package: SUPABASE_URL is blank/invalid (\"$packagingSupabaseUrl\"). " +
+                    "Account login would resolve to https://localhost and fail with 'Connection refused'. " +
+                    "Set SUPABASE_URL and SUPABASE_ANON_KEY in local.properties " +
+                    "(published for third-party clients at https://nuvio.tv/docs), then rebuild.",
+            )
+        }
+    }
+}
+
 val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
     "aarch64", "arm64" -> "arm64"
     "x86" -> "x86"
