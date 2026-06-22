@@ -4,6 +4,20 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.10-alpha] — Linux
+
+### Fixed
+- **Desktop UI hard-freeze + "no streams found"** when opening a title with multiple
+  stream plugins. The plugin runtime ran QuickJS and its *synchronous* native fetch on
+  `Dispatchers.Default`; a fan-out of scrapers (16 in the reported case) parked every
+  scheduler thread in `runBlocking`, starving `Dispatchers.Default`. On desktop that
+  deadlocks the UI thread, because Compose's `stringResource()` does a blocking resource
+  load on the EDT — so the whole app froze (no back, no window close) and no streams
+  resolved. The QuickJS runtime now runs on a dedicated, isolated thread pool
+  (`newFixedThreadPoolContext`), with the HTTP request itself on `Dispatchers.IO`, so
+  plugin blocking can never starve the shared dispatchers. Regression from the upstream
+  plugin-dispatcher changes (reported upstream). Diagnosed from a JVM thread dump.
+
 ## [0.1.9-alpha] — Linux
 
 ### Fixed

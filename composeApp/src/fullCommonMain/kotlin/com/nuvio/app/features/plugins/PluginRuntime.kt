@@ -9,7 +9,9 @@ import com.fleeksoft.ksoup.nodes.Document
 import com.fleeksoft.ksoup.nodes.Element
 import com.fleeksoft.ksoup.select.Elements
 import com.nuvio.app.features.addons.httpRequestRaw
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.newFixedThreadPoolContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -32,10 +34,20 @@ private const val SLOW_PLUGIN_FETCH_MS = 2_000L
 private const val MAX_FETCH_BODY_CHARS = 256 * 1024
 private const val MAX_FETCH_HEADER_VALUE_CHARS = 8 * 1024
 private const val FETCH_TRUNCATION_SUFFIX = "\n...[truncated]"
+private const val PLUGIN_DISPATCHER_THREADS = 24
 
 internal object PluginRuntime {
     private val log = Logger.withTag("PluginRuntime")
-    private val pluginDispatcher = Dispatchers.Default
+
+    // QuickJS calls native fetch *synchronously*, so the engine thread parks in
+    // runBlocking for the duration of each request. Running that on a shared
+    // dispatcher (Dispatchers.Default/IO) lets a fan-out of scrapers occupy every
+    // scheduler thread at once, which starves Dispatchers.Default — and on desktop
+    // that deadlocks the UI, because Compose's stringResource() does a blocking
+    // resource load on the EDT. An isolated thread pool keeps plugin blocking off
+    // the shared dispatchers entirely. Process-lifetime singleton; never closed.
+    @OptIn(DelicateCoroutinesApi::class)
+    private val pluginDispatcher = newFixedThreadPoolContext(PLUGIN_DISPATCHER_THREADS, "nuvio-plugin")
     private val json = Json {
         ignoreUnknownKeys = true
     }
@@ -330,7 +342,11 @@ internal object PluginRuntime {
             }
 
             val startedAt = kotlin.time.TimeSource.Monotonic.markNow()
-            val response = runBlocking(pluginDispatcher) {
+            // Run the actual network request on Dispatchers.IO. This blocks the
+            // calling plugin-pool thread (fine — it's isolated, not a shared
+            // scheduler thread), so each scraper holds only one plugin-pool thread
+            // while its HTTP work uses IO.
+            val response = runBlocking(Dispatchers.IO) {
                 httpRequestRaw(
                     method = method,
                     url = url,
