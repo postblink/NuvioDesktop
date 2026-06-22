@@ -4,6 +4,23 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.11-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (~89 commits). Notably a **modular plugin-runtime rewrite**
+  (`PluginRuntime.kt` → `plugins/runtime/` with `js/JsRuntime.kt`, `network/FetchBridge.kt`,
+  crypto/dom/wasm bridges, URL bridge, enhanced polyfills), desktop fullscreen HUD control
+  fixes, home-collections refresh fix, and assorted mobile/iOS fixes. Bumped `kotlinx-atomicfu`
+  to upstream's `0.30.0`.
+
+### Fixed
+- **Re-applied the plugin-runtime freeze fix to the new modular runtime.** Upstream's rewrite
+  moved QuickJS into `js/JsRuntime.kt`, still defaulting to `Dispatchers.Default` — which
+  reintroduces the desktop UI freeze (see 0.1.10) at high plugin fan-out. `JsRuntime` now
+  defaults to a dedicated isolated `newFixedThreadPoolContext` pool, so plugin blocking can't
+  starve the shared dispatchers. (Reported upstream separately; their inline-`runBlocking`
+  change is only a partial mitigation.)
+
 ## [0.1.10-alpha] — Linux
 
 ### Fixed
