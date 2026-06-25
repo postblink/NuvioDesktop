@@ -23,7 +23,9 @@ import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerLaunchShield
 import com.nuvio.app.features.player.desktop.NativePlayerController
 import com.nuvio.app.features.player.desktop.NativePlayerHost
+import com.nuvio.app.features.player.desktop.desktopFullscreenChanges
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
 
 @Composable
 actual fun PlatformPlayerSurface(
@@ -128,7 +130,7 @@ private fun NativePlayerSurface(
     val decoderPriority = playerSettings.decoderPriority
     val nvidiaRtxSuperResolutionEnabled = playerSettings.nvidiaRtxSuperResolutionEnabled
 
-    LaunchedEffect(controller) {
+    LaunchedEffect(controller, sourceUrl, playbackHeaders) {
         onControllerReady(controller)
     }
 
@@ -181,6 +183,7 @@ private fun NativePlayerSurface(
             nvidiaRtxSuperResolutionEnabled = nvidiaRtxSuperResolutionEnabled,
             onError = { message -> latestOnError.value(message) },
         )
+        onControllerReady(controller)
     }
 
     LaunchedEffect(controller, playWhenReady) {
@@ -197,6 +200,12 @@ private fun NativePlayerSurface(
 
     LaunchedEffect(controller, playerControlsState) {
         controller.updateControls(playerControlsState)
+    }
+
+    LaunchedEffect(controller) {
+        desktopFullscreenChanges.drop(1).collect {
+            controller.onDesktopFullscreenChanged()
+        }
     }
 
     LaunchedEffect(controller) {

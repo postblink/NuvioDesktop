@@ -4,6 +4,17 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.12-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (8 commits across two syncs since 0.1.11). Desktop player &
+  UI fixes: **player controls now re-attach after advancing to the next episode**,
+  **playback volume persists across sessions**, **maximised-window contents no longer
+  buried under the taskbar**, Windows borderless-fullscreen focus fix, macOS spatial
+  audio, and a stream-chip drag-scroll fix. No changes to the plugin runtime — the
+  desktop freeze fix (`JsRuntime` dedicated dispatcher) and the Linux player bridge
+  are untouched.
+
 ## [0.1.11-alpha] — Linux
 
 ### Upstream sync
