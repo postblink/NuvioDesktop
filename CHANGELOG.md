@@ -4,6 +4,25 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.14-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (7 commits). Watch-state improvements: **home startup stabilised
+  and watched badges refresh correctly**, **series watched-state reconciliation outside the
+  details screen**, **snapshot sync on mobile startup**, and poster-badge refresh for series.
+  Desktop: **hero section logo hover surface removed**. Dominant-colour background stability
+  fix (follow-up to 0.1.13).
+
+## [0.1.13-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (41 commits). Notable: **support for up to 6 user profiles**
+  (sidebar overlap fix included), **dominant-colour dynamic background** on meta detail
+  screens, Bulgarian and Slovak localisations, external-player skip-segment support,
+  stream-loading preservation during external-player prep, source-change playback
+  recreation fix, and assorted mobile/player refinements. No changes to the plugin runtime
+  or Linux player bridge.
+
 ## [0.1.12-alpha] — Linux
 
 ### Upstream sync
