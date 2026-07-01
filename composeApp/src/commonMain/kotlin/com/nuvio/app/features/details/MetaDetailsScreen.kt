@@ -171,6 +171,7 @@ fun MetaDetailsScreen(
         WatchedRepository.ensureLoaded()
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
+    val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
     val watchProgressUiState by remember {
         WatchProgressRepository.ensureLoaded()
         WatchProgressRepository.uiState
@@ -369,10 +370,11 @@ fun MetaDetailsScreen(
                 ) {
                     LibraryRepository.isSaved(meta.id, meta.type)
                 }
-                val isWatched = remember(watchedUiState.watchedKeys, metaPreview) {
+                val isWatched = remember(watchedUiState.watchedKeys, fullyWatchedSeriesKeys, metaPreview) {
                     WatchingState.isPosterWatched(
                         watchedKeys = watchedUiState.watchedKeys,
                         item = metaPreview,
+                        fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                     )
                 }
                 val openLibraryListPicker = remember(meta) {
