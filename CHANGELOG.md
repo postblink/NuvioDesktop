@@ -4,6 +4,23 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+## [0.1.15-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (20 commits). Notable: **realtime sync invalidation** (with
+  self-originated event filtering), **Compose Multiplatform beta bump** (1.12.0-beta01),
+  runtime configuration refactor, horizontal scrolling in the profile switcher tab,
+  Android dominant-colour extraction fix, and French/Spanish translation passes. The
+  plugin runtime keeps the dedicated dispatcher (verified post-merge); Linux player
+  bridge untouched.
+
+### Fixed
+- **Desktop addon HTTP bridge no longer aborts requests carrying hop-by-hop headers.**
+  Plugins routinely send `Connection: keep-alive`; `java.net.http` rejects restricted
+  headers with `IllegalArgumentException`, killing the whole fetch. Restricted headers
+  are now dropped before the request is built. (Pre-existing bug, surfaced during the
+  0.1.15 smoke test — 39 occurrences in one session.)
+
 ## [0.1.14-alpha] — Linux
 
 ### Upstream sync
