@@ -39,6 +39,11 @@ private val desktopHttpClient: HttpClient = HttpClient.newBuilder()
     .followRedirects(HttpClient.Redirect.NORMAL)
     .build()
 
+// java.net.http throws IllegalArgumentException on these hop-by-hop headers, which
+// would abort the whole request; plugins routinely send them (e.g. Connection:
+// keep-alive). The client manages these itself, so dropping them is safe.
+private val restrictedHeaders = setOf("connection", "content-length", "expect", "host", "upgrade")
+
 actual suspend fun httpGetText(url: String): String =
     httpGetTextWithHeaders(url, emptyMap())
 
@@ -92,7 +97,7 @@ actual suspend fun httpRequestRaw(
         )
 
     headers.forEach { (key, value) ->
-        if (key.isNotBlank() && value.isNotBlank()) {
+        if (key.isNotBlank() && value.isNotBlank() && key.trim().lowercase() !in restrictedHeaders) {
             requestBuilder.header(key, value)
         }
     }
