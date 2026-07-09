@@ -4,6 +4,29 @@ This changelog covers the **unofficial Linux fork** only. It tracks
 [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and documents
 the Linux-specific work layered on top.
 
+Each **Upstream sync** entry states the upstream ref being tracked as of that merge —
+either their latest version tag, or (when `Dev` has moved past their last tag) that tag
+plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
+
+## [0.1.16-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (80 commits) — synced through **`0.1.11-alpha` + 25 untagged
+  commits (`6ff150fd`)**, upstream's latest tag lags their `Dev` branch by that much.
+  Notable: **cmp-rewrite performance pass** merged into desktopweb (reduced Compose
+  recomposition hotspots, home tab stays mounted), **P2P streaming for desktop**,
+  **Sentry diagnostics**, **Trakt credential sync across clients**, macOS Now Playing
+  support, deeplinks for addons/detail screens, desktop windowed-geometry-during-fullscreen
+  fix, Windows display-sleep inhibit during playback, macOS TorrServer resource bundling,
+  and continue-watching/home-catalog sync-key fixes. Croatian, Greek, Hungarian, and
+  additional Italian translation passes.
+
+### Changed
+- **Desktop addon HTTP bridge rewritten onto OkHttp** (upstream). This supersedes the
+  0.1.15 JDK-restricted-headers fix — OkHttp doesn't reject hop-by-hop headers the way
+  `java.net.http` did, so the workaround is gone rather than reapplied; upstream's version
+  also adds response-body truncation (1 MiB cap) and a custom IPv4-first DNS resolver.
+
 ## [0.1.15-alpha] — Linux
 
 ### Upstream sync
