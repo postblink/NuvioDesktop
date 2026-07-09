@@ -8,6 +8,20 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.18-alpha] — Linux
+
+### Added
+- **Trakt sign-in and syncing now work in this fork's builds**, via a **separate,
+  fork-specific Trakt OAuth application** — not the official Nuvio one. The official
+  desktop builds bake in NuvioMedia's private Trakt credentials, which aren't published,
+  so we don't have access to the official OAuth implementation as it stands. **Until an
+  official Linux desktop build ships**, this fork registers its own Trakt app so scrobbling
+  and watched/collection sync still function; when an official Linux build launches, this
+  fork will defer to the official integration. Desktop uses Trakt's device-code flow
+  (**Settings → Trakt → Connect** → `trakt.tv/activate` + a short code), identical across
+  Windows/macOS/Linux. The fork app requests **scrobble** permission only (no checkin).
+  See the README **Trakt** section for details.
+
 ## [0.1.17-alpha] — Linux
 
 ### Fixed

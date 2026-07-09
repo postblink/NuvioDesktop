@@ -45,6 +45,22 @@ Release packages are provided for supported desktop platforms:
 > Install your distro's mpv/libmpv package before running (e.g. `mpv` / `libmpv2` /
 > `libmpv-dev`). The app resolves `libmpv.so.2` from the system at runtime.
 
+## Trakt
+
+> [!NOTE]
+> **This unofficial Linux fork uses its own, fork-specific Trakt OAuth application** —
+> not the official Nuvio one. The official desktop builds bake in NuvioMedia's private
+> Trakt OAuth credentials, which aren't published, so we don't have access to the official
+> OAuth implementation as it stands. **Until an official Linux desktop app launches**, this
+> fork registers a separate Trakt app so Trakt syncing (scrobbling, watched/collection
+> sync) still works. Functionality is identical — only the registered OAuth application
+> differs — and when an official Linux build ships, this fork will defer to the official
+> Trakt integration.
+
+Sign-in uses Trakt's device-code flow: **Settings → Trakt → Connect** opens
+`trakt.tv/activate` in your browser and shows a short code to enter. No callback/redirect
+is involved, so it works the same on Windows, macOS, and Linux.
+
 ## Development
 
 ```bash
@@ -57,6 +73,22 @@ Run from source:
 ```bash
 ./gradlew :composeApp:run
 ```
+
+### Build configuration (optional secrets)
+
+Optional API credentials are read from a **gitignored** `local.properties` at the repo
+root by `GenerateRuntimeConfigsTask`; every key defaults to empty, so an empty file still
+builds and launches the UI. To enable Trakt in your own build, register a Trakt app at
+<https://trakt.tv/oauth/applications> and set:
+
+```properties
+TRAKT_CLIENT_ID=<your client id>
+TRAKT_CLIENT_SECRET=<your client secret>
+```
+
+The redirect URI is unused by the desktop device-code flow. Because a client secret baked
+into a distributed binary is only semi-secret, **use your own Trakt app — never reuse
+another project's credentials.**
 
 On Windows PowerShell:
 
