@@ -11,6 +11,7 @@ import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.TaskAction
 import org.gradle.jvm.tasks.Jar
+import org.gradle.language.jvm.tasks.ProcessResources
 import org.gradle.process.ExecOperations
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -45,6 +46,18 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val supabaseAnonKey: Property<String>
 
+    @get:Input
+    abstract val supabaseFallbackUrl: Property<String>
+
+    @get:Input
+    abstract val sentryDsn: Property<String>
+
+    @get:Input
+    abstract val sentryEnvironment: Property<String>
+
+    @get:Input
+    abstract val realtimeSyncEnabled: Property<Boolean>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -60,6 +73,34 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |object SupabaseConfig {
                 |    const val URL = "${supabaseUrl.get()}"
                 |    const val ANON_KEY = "${supabaseAnonKey.get()}"
+                |    const val FALLBACK_URL = "${supabaseFallbackUrl.get()}"
+                |}
+                """.trimMargin()
+            )
+        }
+
+        outDir.resolve("com/nuvio/app/core/diagnostics").apply {
+            mkdirs()
+            resolve("SentryConfig.kt").writeText(
+                """
+                |package com.nuvio.app.core.diagnostics
+                |
+                |object SentryConfig {
+                |    const val DSN = "${sentryDsn.get()}"
+                |    const val ENVIRONMENT = "${sentryEnvironment.get()}"
+                |}
+                """.trimMargin()
+            )
+        }
+
+        outDir.resolve("com/nuvio/app/core/sync").apply {
+            mkdirs()
+            resolve("RealtimeSyncConfig.kt").writeText(
+                """
+                |package com.nuvio.app.core.sync
+                |
+                |object RealtimeSyncConfig {
+                |    const val ENABLED = ${realtimeSyncEnabled.get()}
                 |}
                 """.trimMargin()
             )
@@ -257,6 +298,59 @@ abstract class NotarizeMacosDmgWithKeychainTask @Inject constructor(
             dmg.copyTo(publishedDmg, overwrite = true)
         }
         logger.lifecycle("Published macOS DMG artifact: ${publishedDmg.absolutePath}")
+    }
+}
+
+abstract class PrepareMacosTorrServerResourcesTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:InputDirectory
+    abstract val sourceDir: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Input
+    abstract val signingIdentity: Property<String>
+
+    @TaskAction
+    fun prepare() {
+        val sourceRoot = sourceDir.get().asFile
+        val outputRoot = outputDir.get().asFile
+        val resourceRoot = outputRoot.resolve("torrserver")
+
+        outputRoot.deleteRecursively()
+        resourceRoot.mkdirs()
+
+        sourceRoot.walkTopDown()
+            .filter(File::isFile)
+            .forEach { sourceFile ->
+                val relativePath = sourceFile.relativeTo(sourceRoot)
+                val outputFile = resourceRoot.resolve(relativePath.path)
+                outputFile.parentFile.mkdirs()
+                sourceFile.copyTo(outputFile, overwrite = true)
+                outputFile.setExecutable(sourceFile.canExecute())
+            }
+
+        val identity = signingIdentity.get().trim()
+        if (identity.isNotEmpty()) {
+            resourceRoot.walkTopDown()
+                .filter(File::isFile)
+                .forEach { binary ->
+                    execOperations.exec {
+                        commandLine(
+                            "codesign",
+                            "--force",
+                            "--options",
+                            "runtime",
+                            "--timestamp",
+                            "--sign",
+                            identity,
+                            binary.absolutePath,
+                        )
+                    }
+                }
+        }
     }
 }
 
@@ -465,6 +559,13 @@ fun runtimeConfigValue(key: String, fallback: String = ""): String =
         ?: providers.environmentVariable(key).orNull?.trim()?.takeIf { it.isNotBlank() }
         ?: fallback
 
+fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
+    when (runtimeConfigValue(key).lowercase()) {
+        "1", "true", "yes", "y", "on" -> true
+        "0", "false", "no", "n", "off" -> false
+        else -> default
+    }
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     localPropertiesFile.set(rootProject.layout.projectDirectory.file("local.properties"))
@@ -474,11 +575,27 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     desktopAppVersionCode.set(desktopReleaseVersionCode)
     supabaseUrl.set(runtimeConfigValue("NUVIO_SUPABASE_URL"))
     supabaseAnonKey.set(runtimeConfigValue("NUVIO_SUPABASE_ANON_KEY"))
+    supabaseFallbackUrl.set(runtimeConfigValue("NUVIO_SUPABASE_FALLBACK_URL"))
+    sentryDsn.set(runtimeConfigValue("SENTRY_DSN"))
+    sentryEnvironment.set(
+        when {
+            requestedGradleTasks.any { "benchmark" in it } -> "benchmark"
+            requestedGradleTasks.any { "debug" in it } -> "debug"
+            else -> "production"
+        }
+    )
+    realtimeSyncEnabled.set(runtimeConfigBoolean("NUVIO_REALTIME_SYNC_ENABLED", true))
 }
 
 val isMacHost = System.getProperty("os.name").contains("mac", ignoreCase = true)
 val isWindowsHost = System.getProperty("os.name").contains("win", ignoreCase = true)
 val isLinuxHost = System.getProperty("os.name").contains("linux", ignoreCase = true)
+val prepareMacosTorrServerResources = tasks.register<PrepareMacosTorrServerResourcesTask>("prepareMacosTorrServerResources") {
+    enabled = isMacHost
+    sourceDir.set(layout.projectDirectory.dir("src/desktopMain/torrserver"))
+    outputDir.set(layout.buildDirectory.dir("generated/signed-macos-torrserver-resources"))
+    signingIdentity.set(macosSigningIdentity.orEmpty())
+}
 val mpvKitDir = providers.gradleProperty("nuvio.mpvkit.dir")
     .orElse(rootProject.layout.projectDirectory.dir("MPVKit").asFile.absolutePath)
 val macosPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/macos/player_bridge.mm")
@@ -926,6 +1043,13 @@ tasks.withType<Jar>().configureEach {
     }
 }
 
+tasks.withType<ProcessResources>().matching { it.name == "desktopProcessResources" }.configureEach {
+    if (isMacHost) {
+        dependsOn(prepareMacosTorrServerResources)
+        from(prepareMacosTorrServerResources.map { it.outputDir })
+    }
+}
+
 if (isWindowsHost) {
     val desktopNativePlayerTasks = setOf(
         "run",
@@ -1064,6 +1188,7 @@ kotlin {
                 implementation("com.google.code.gson:gson:2.11.0")
                 implementation("io.github.peerless2012:ass-media:0.4.0-beta01")
                 implementation(libs.ktor.client.okhttp)
+                implementation(libs.sentry.android)
                 implementation(libs.androidx.media3.exoplayer.hls)
                 implementation(libs.androidx.media3.exoplayer.dash)
                 implementation(libs.androidx.media3.exoplayer.smoothstreaming)
@@ -1089,6 +1214,7 @@ kotlin {
                 implementation(compose.desktop.currentOs)
                 implementation(libs.kotlinx.coroutines.swing)
                 implementation(libs.ktor.client.cio)
+                implementation("com.squareup.okhttp3:okhttp:4.12.0")
                 implementation(libs.quickjs.kt)
                 implementation(libs.ksoup)
             }
@@ -1154,11 +1280,28 @@ compose.desktop {
                 "java.instrument",
                 "java.management",
                 "java.net.http",
+                "jdk.httpserver",
                 "jdk.unsupported",
             )
             macOS {
                 bundleID = "com.nuvio.media.desktop"
                 iconFile.set(project.file("src/desktopMain/resources/icons/nuvio-app-icon.icns"))
+                infoPlist {
+                    extraKeysRawXml = """
+                        <key>CFBundleURLTypes</key>
+                        <array>
+                            <dict>
+                                <key>CFBundleURLName</key>
+                                <string>com.nuvio.media.desktop</string>
+                                <key>CFBundleURLSchemes</key>
+                                <array>
+                                    <string>nuvio</string>
+                                    <string>stremio</string>
+                                </array>
+                            </dict>
+                        </array>
+                    """.trimIndent()
+                }
                 if (macosSigningIdentity != null) {
                     signing {
                         sign.set(true)
