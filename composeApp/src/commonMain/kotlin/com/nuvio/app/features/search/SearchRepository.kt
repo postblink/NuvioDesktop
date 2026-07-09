@@ -339,6 +339,13 @@ object SearchRepository {
                     )
                 }
         }
+            // Two catalogs can resolve to the same (addon, type, catalogId), which produces
+            // duplicate section keys ("<id>:search:<type>:<catalogId>:<query>") — LazyColumn/
+            // subcompose require unique keys, and the streaming-in duplicates crash the search
+            // list during Compose's lookahead pass. Same tuple = same fetch, so drop duplicates.
+            .distinctBy { request ->
+                "${request.addon.manifest?.id}:${request.type}:${request.catalogId}"
+            }
 
     private fun buildDiscoverSources(addons: List<ManagedAddon>): List<DiscoverCatalogOption> =
         addons.mapNotNull { addon ->

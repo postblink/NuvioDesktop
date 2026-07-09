@@ -8,6 +8,18 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.17-alpha] — Linux
+
+### Fixed
+- **Search list no longer crashes when two catalogs resolve to the same
+  `(addon, type, catalogId)`.** Duplicate tuples produced duplicate section keys
+  (`<id>:search:<type>:<catalogId>:<query>`); as results streamed in, the duplicate
+  LazyColumn/subcompose keys crashed the search list during Compose's lookahead pass
+  (surfaced as "layout state is not idle before measure starts", masking the real
+  "Key … was already used"). `buildSearchRequests` now drops duplicates at the source —
+  same tuple is the same fetch. (Ported from the HTPC fork; a generic `commonMain` bug
+  that also affects upstream.)
+
 ## [0.1.16-alpha] — Linux
 
 ### Upstream sync
