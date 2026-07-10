@@ -8,6 +8,17 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.19-alpha] — Linux
+
+### Fixed
+- **Premiumize sign-in now works in this fork's builds.** Premiumize uses an OAuth
+  device-code flow gated on `PREMIUMIZE_CLIENT_ID`, which was empty in our builds — so
+  **Settings → Debrid → Premiumize → Connect** failed with a "missing configuration" error.
+  As with Trakt, the official builds bake in NuvioMedia's private Premiumize client, which
+  isn't published, so this fork registers its **own** Premiumize OAuth client (device-code
+  flow, `client_id` only — no secret) **until an official Linux desktop build ships**, at
+  which point it'll defer to the official integration. See the README **Premiumize** section.
+
 ## [0.1.18-alpha] — Linux
 
 ### Added

@@ -61,6 +61,16 @@ Sign-in uses Trakt's device-code flow: **Settings → Trakt → Connect** opens
 `trakt.tv/activate` in your browser and shows a short code to enter. No callback/redirect
 is involved, so it works the same on Windows, macOS, and Linux.
 
+## Premiumize
+
+> [!NOTE]
+> Same situation as Trakt: **this fork uses its own Premiumize OAuth client**, not the
+> official Nuvio one, because NuvioMedia's Premiumize client isn't published. It's a
+> **temporary measure until an official Linux desktop app launches**, after which the fork
+> will defer to the official integration. Premiumize sign-in uses a device-code flow
+> (**Settings → Debrid → Premiumize → Connect** → `premiumize.me/device` + a short code);
+> the fork client uses `client_id` only (no secret).
+
 ## Development
 
 ```bash
@@ -86,9 +96,16 @@ TRAKT_CLIENT_ID=<your client id>
 TRAKT_CLIENT_SECRET=<your client secret>
 ```
 
-The redirect URI is unused by the desktop device-code flow. Because a client secret baked
-into a distributed binary is only semi-secret, **use your own Trakt app — never reuse
-another project's credentials.**
+For Premiumize, register a client at <https://www.premiumize.me/registerclient> and set
+`PREMIUMIZE_CLIENT_ID` (device-code flow — `client_id` only, no secret):
+
+```properties
+PREMIUMIZE_CLIENT_ID=<your client id>
+```
+
+The Trakt redirect URI is unused by the desktop device-code flow. Because credentials baked
+into a distributed binary are only semi-secret, **use your own Trakt/Premiumize apps — never
+reuse another project's credentials.**
 
 On Windows PowerShell:
 
