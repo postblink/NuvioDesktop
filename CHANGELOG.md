@@ -8,6 +8,19 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.20-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (48 commits) through official **`0.1.12-alpha` (`64dcc8be`)**.
+  Notable shared updates include the Navigation 3 migration, foreground and watch-progress
+  sync fixes, profile-safe library state, debrid-first stream resolution, configurable
+  poster/card depth and zoom actions, the content-warnings preference, and Dutch, Romanian,
+  and Vietnamese translations. Desktop also adopts upstream's removal of the temporary
+  playback proxy; macOS receives its new bundled dynamic player runtime.
+- Preserved the Linux Compose/libmpv player and AppImage packaging, the dedicated QuickJS
+  dispatcher that prevents plugin fan-out deadlocks, search-request deduplication, and the
+  fork-specific Trakt and Premiumize OAuth configuration.
+
 ## [0.1.19-alpha] — Linux
 
 ### Fixed
