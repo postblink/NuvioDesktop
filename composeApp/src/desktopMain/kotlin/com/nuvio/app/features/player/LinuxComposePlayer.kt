@@ -53,7 +53,9 @@ internal fun LinuxComposePlayerSurface(
     playWhenReady: Boolean,
     resizeMode: PlayerResizeMode,
     initialPositionMs: Long,
+    initialPositionRequestKey: String?,
     decoderPriority: Int,
+    onInitialPositionHandled: (key: String, handled: Boolean) -> Unit,
     onControllerReady: (PlayerEngineController) -> Unit,
     onSnapshot: (PlayerPlaybackSnapshot) -> Unit,
     onError: (String?) -> Unit,
@@ -65,8 +67,8 @@ internal fun LinuxComposePlayerSurface(
     LaunchedEffect(controller) { onControllerReady(controller) }
 
     // Create the player (off the main thread; create() loads the file).
-    LaunchedEffect(sourceUrl, sourceHeaders) {
-        withContext(Dispatchers.IO) {
+    LaunchedEffect(sourceUrl, sourceHeaders, initialPositionMs, initialPositionRequestKey) {
+        val openResult = withContext(Dispatchers.IO) {
             runCatching {
                 controller.open(
                     sourceUrl = sourceUrl,
@@ -75,7 +77,11 @@ internal fun LinuxComposePlayerSurface(
                     initialPositionMs = initialPositionMs.coerceAtLeast(0L),
                     decoderPriority = decoderPriority,
                 )
-            }.onFailure { onError(it.message) }
+            }
+        }
+        openResult.onFailure { onError(it.message) }
+        initialPositionRequestKey?.let { key ->
+            onInitialPositionHandled(key, openResult.isSuccess && initialPositionMs > 0L)
         }
     }
 

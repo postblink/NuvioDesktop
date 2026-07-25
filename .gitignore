@@ -20,6 +20,7 @@ captures
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
 logs/
+hs_err_pid*.log
 analysis/
 Docs
 keystore/
@@ -29,6 +30,9 @@ scripts/scrape_android_compose_animation_docs.py
 tools
 AGENTS.md
 server
+
+composeApp/src/desktopMain/resources/torrserver/windows-amd64/TorrServer.exe
+
 PERFORMANCE_FINDINGS.md
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)
