@@ -56,6 +56,7 @@ internal object NativePlayerBridge {
     external fun isEnded(handle: Long): Boolean
     external fun isPaused(handle: Long): Boolean
     external fun speed(handle: Long): Float
+    external fun consumeError(handle: Long): String?
 
     // Linux software-render path: fills the direct ByteBuffer with the current
     // frame as RGBA8888 (width*height*4 bytes). Returns true if a frame rendered.

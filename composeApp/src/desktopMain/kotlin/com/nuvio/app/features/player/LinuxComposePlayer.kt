@@ -66,11 +66,14 @@ internal fun LinuxComposePlayerSurface(
 
     LaunchedEffect(controller) { onControllerReady(controller) }
 
-    // Create the player (off the main thread; create() loads the file).
+    // Create the player off the main thread. Each request gets a generation so a
+    // cancelled native create can never overwrite a newer source when it returns.
     LaunchedEffect(sourceUrl, sourceHeaders, initialPositionMs, initialPositionRequestKey) {
+        val request = controller.beginOpen(playWhenReady)
         val openResult = withContext(Dispatchers.IO) {
             runCatching {
-                controller.open(
+                controller.completeOpen(
+                    request = request,
                     sourceUrl = sourceUrl,
                     headerLines = sourceHeaders.toHeaderLines().toTypedArray(),
                     playWhenReady = playWhenReady,
@@ -79,25 +82,30 @@ internal fun LinuxComposePlayerSurface(
                 )
             }
         }
-        openResult.onFailure { onError(it.message) }
+        val installed = openResult.getOrElse { error ->
+            onError(error.message ?: "Unable to initialize the Linux player.")
+            false
+        }
+        if (!installed) return@LaunchedEffect
         initialPositionRequestKey?.let { key ->
-            onInitialPositionHandled(key, openResult.isSuccess && initialPositionMs > 0L)
+            onInitialPositionHandled(key, initialPositionMs > 0L)
         }
     }
 
     LaunchedEffect(controller, playWhenReady) {
-        if (playWhenReady) controller.play() else controller.pause()
+        controller.setPlayWhenReady(playWhenReady)
     }
 
     LaunchedEffect(controller, resizeMode) { controller.setResizeMode(resizeMode) }
 
-    DisposableEffect(controller, sourceUrl) {
+    DisposableEffect(controller) {
         onDispose { controller.dispose() }
     }
 
     // Poll a playback snapshot for the controls.
     LaunchedEffect(controller) {
         while (isActive) {
+            controller.consumeError()?.let(onError)
             onSnapshot(controller.snapshot())
             kotlinx.coroutines.delay(500L)
         }
@@ -111,28 +119,33 @@ internal fun LinuxComposePlayerSurface(
         var bufH = 0
         while (isActive) {
             androidx.compose.runtime.withFrameNanos { }
-            // Guard the body so a transient render/decode error can't silently
-            // kill the loop (and freeze video) for the rest of the session.
-            runCatching {
-                val w = surfaceSize.width
-                val h = surfaceSize.height
-                if (w <= 0 || h <= 0 || !controller.isReady()) return@runCatching
-                if (buffer == null || bufW != w || bufH != h) {
-                    buffer = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
-                    bytes = ByteArray(w * h * 4)
-                    bufW = w
-                    bufH = h
-                }
-                val buf = buffer ?: return@runCatching
-                val arr = bytes ?: return@runCatching
-                if (controller.renderFrame(w, h, buf)) {
+            val w = surfaceSize.width
+            val h = surfaceSize.height
+            if (w <= 0 || h <= 0 || !controller.isReady()) continue
+            // Native software rendering and the full-frame copy are expensive;
+            // keep both off the Compose dispatcher so controls remain responsive.
+            val renderedFrame = withContext(Dispatchers.Default) {
+                runCatching {
+                    if (buffer == null || bufW != w || bufH != h) {
+                        val pixelBytes = Math.multiplyExact(Math.multiplyExact(w, h), 4)
+                        buffer = ByteBuffer.allocateDirect(pixelBytes).order(ByteOrder.nativeOrder())
+                        bytes = ByteArray(pixelBytes)
+                        bufW = w
+                        bufH = h
+                    }
+                    val buf = buffer ?: return@runCatching null
+                    val arr = bytes ?: return@runCatching null
+                    if (!controller.renderFrame(w, h, buf)) return@runCatching null
                     buf.rewind()
                     buf.get(arr)
-                    val bitmap = Bitmap()
-                    bitmap.setImageInfo(ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.OPAQUE))
-                    bitmap.installPixels(arr)
-                    frame = bitmap.asComposeImageBitmap()
-                }
+                    Bitmap().apply {
+                        setImageInfo(ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.OPAQUE))
+                        installPixels(arr)
+                    }.asComposeImageBitmap()
+                }.getOrNull()
+            }
+            if (renderedFrame != null) {
+                frame = renderedFrame
             }
         }
     }
@@ -200,19 +213,34 @@ private fun Int.toHexByte(): String {
 }
 
 private class LinuxComposePlayerController : PlayerEngineController {
-    @Volatile
-    private var handle: Long = 0L
+    private val handles = LinuxPlayerHandleState()
     private val noOpSink = NativePlayerEventSink { _, _ -> }
+    @Volatile
+    private var desiredPlayWhenReady = true
+    @Volatile
+    private var desiredPlaybackSpeed = 1f
+    @Volatile
+    private var pendingResizeMode = PlayerResizeMode.Fit
+    @Volatile
+    private var pendingSubtitleDelayMs = 0
+    @Volatile
+    private var pendingSubtitleStyle: SubtitleStyleState? = null
 
-    fun open(
+    fun beginOpen(playWhenReady: Boolean): LinuxPlayerOpenRequest {
+        desiredPlayWhenReady = playWhenReady
+        return handles.beginOpen()
+    }
+
+    fun completeOpen(
+        request: LinuxPlayerOpenRequest,
         sourceUrl: String,
         headerLines: Array<String>,
         playWhenReady: Boolean,
         initialPositionMs: Long,
         decoderPriority: Int,
-    ) {
-        dispose()
-        handle = NativePlayerBridge.create(
+    ): Boolean {
+        disposeHandle(request.previousHandle)
+        val created = NativePlayerBridge.create(
             hostViewPtr = 0L,
             sourceUrl = sourceUrl,
             headerLines = headerLines,
@@ -224,17 +252,33 @@ private class LinuxComposePlayerController : PlayerEngineController {
             nvidiaRtxSuperResolutionEnabled = false,
             eventSink = noOpSink,
         )
+        check(created != 0L) { "Native player did not return a handle." }
+        if (!handles.install(request.generation, created)) {
+            disposeHandle(created)
+            return false
+        }
+        NativePlayerBridge.setPaused(created, !desiredPlayWhenReady)
+        applyResizeMode(created, pendingResizeMode)
+        NativePlayerBridge.setSpeed(created, desiredPlaybackSpeed)
+        NativePlayerBridge.setSubtitleDelayMs(created, pendingSubtitleDelayMs)
+        pendingSubtitleStyle?.let { applySubtitleStyle(created, it) }
+        return true
     }
 
-    fun isReady(): Boolean = handle != 0L
+    fun isReady(): Boolean = handles.current() != 0L
 
     fun renderFrame(width: Int, height: Int, buffer: ByteBuffer): Boolean {
-        val current = handle
+        val current = handles.current()
         return current != 0L && NativePlayerBridge.renderFrame(current, width, height, buffer)
     }
 
+    fun consumeError(): String? {
+        val current = handles.current()
+        return if (current == 0L) null else NativePlayerBridge.consumeError(current)
+    }
+
     fun snapshot(): PlayerPlaybackSnapshot {
-        val current = handle
+        val current = handles.current()
         if (current == 0L) return PlayerPlaybackSnapshot(isLoading = true)
         return runCatching {
             val isLoading = NativePlayerBridge.isLoading(current)
@@ -252,39 +296,51 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     fun setResizeMode(mode: PlayerResizeMode) {
-        handle.takeIf { it != 0L }?.let { current ->
-            NativePlayerBridge.setResizeMode(
-                current,
-                when (mode) {
-                    PlayerResizeMode.Fit -> 0
-                    PlayerResizeMode.Fill -> 1
-                    PlayerResizeMode.Zoom -> 2
-                    PlayerResizeMode.Stretch -> 3
-                },
-            )
-        }
+        pendingResizeMode = mode
+        handles.current().takeIf { it != 0L }?.let { applyResizeMode(it, mode) }
+    }
+
+    private fun applyResizeMode(handle: Long, mode: PlayerResizeMode) {
+        NativePlayerBridge.setResizeMode(
+            handle,
+            when (mode) {
+                PlayerResizeMode.Fit -> 0
+                PlayerResizeMode.Fill -> 1
+                PlayerResizeMode.Zoom -> 2
+                PlayerResizeMode.Stretch -> 3
+            },
+        )
     }
 
     fun dispose() {
-        val current = handle
-        handle = 0L
-        if (current != 0L) runCatching { NativePlayerBridge.dispose(current) }
+        disposeHandle(handles.clear())
+    }
+
+    private fun disposeHandle(handle: Long) {
+        if (handle != 0L) runCatching { NativePlayerBridge.dispose(handle) }
+    }
+
+    fun setPlayWhenReady(playWhenReady: Boolean) {
+        desiredPlayWhenReady = playWhenReady
+        handles.current().takeIf { it != 0L }?.let {
+            NativePlayerBridge.setPaused(it, !playWhenReady)
+        }
     }
 
     override fun play() {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.setPaused(it, false) }
+        setPlayWhenReady(true)
     }
 
     override fun pause() {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.setPaused(it, true) }
+        setPlayWhenReady(false)
     }
 
     override fun seekTo(positionMs: Long) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.seekTo(it, positionMs) }
+        handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.seekTo(it, positionMs) }
     }
 
     override fun seekBy(offsetMs: Long) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.seekBy(it, offsetMs) }
+        handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.seekBy(it, offsetMs) }
     }
 
     override fun retry() = Unit
@@ -296,7 +352,8 @@ private class LinuxComposePlayerController : PlayerEngineController {
     override fun isHostFullscreen(): Boolean = isDesktopAppFullscreen()
 
     override fun setPlaybackSpeed(speed: Float) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSpeed(it, speed) }
+        desiredPlaybackSpeed = speed
+        handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.setSpeed(it, speed) }
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -305,7 +362,7 @@ private class LinuxComposePlayerController : PlayerEngineController {
         runCatching { json.decodeFromString<List<NativeMpvTrack>>(jsonText) }.getOrDefault(emptyList())
 
     override fun getAudioTracks(): List<AudioTrack> {
-        val current = handle.takeIf { it != 0L } ?: return emptyList()
+        val current = handles.current().takeIf { it != 0L } ?: return emptyList()
         return decodeTracks(NativePlayerBridge.audioTracksJson(current)).map { track ->
             AudioTrack(
                 index = track.index,
@@ -318,7 +375,7 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun getSubtitleTracks(): List<SubtitleTrack> {
-        val current = handle.takeIf { it != 0L } ?: return emptyList()
+        val current = handles.current().takeIf { it != 0L } ?: return emptyList()
         return decodeTracks(NativePlayerBridge.subtitleTracksJson(current)).map { track ->
             SubtitleTrack(
                 index = track.index,
@@ -333,13 +390,13 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun selectAudioTrack(index: Int) {
-        val current = handle.takeIf { it != 0L } ?: return
+        val current = handles.current().takeIf { it != 0L } ?: return
         val trackId = resolveTrackId(index, decodeTracks(NativePlayerBridge.audioTracksJson(current))) ?: return
         NativePlayerBridge.selectAudioTrack(current, trackId)
     }
 
     override fun selectSubtitleTrack(index: Int) {
-        val current = handle.takeIf { it != 0L } ?: return
+        val current = handles.current().takeIf { it != 0L } ?: return
         if (index < 0) {
             NativePlayerBridge.selectSubtitleTrack(current, -1)
             return
@@ -349,15 +406,15 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun setSubtitleUri(url: String) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.addSubtitleUrl(it, url) }
+        handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.addSubtitleUrl(it, url) }
     }
 
     override fun clearExternalSubtitle() {
-        handle.takeIf { it != 0L }?.let(NativePlayerBridge::clearExternalSubtitles)
+        handles.current().takeIf { it != 0L }?.let(NativePlayerBridge::clearExternalSubtitles)
     }
 
     override fun clearExternalSubtitleAndSelect(trackIndex: Int) {
-        val current = handle.takeIf { it != 0L } ?: return
+        val current = handles.current().takeIf { it != 0L } ?: return
         val trackId = if (trackIndex < 0) {
             -1
         } else {
@@ -367,11 +424,17 @@ private class LinuxComposePlayerController : PlayerEngineController {
     }
 
     override fun setSubtitleDelayMs(delayMs: Int) {
-        handle.takeIf { it != 0L }?.let { NativePlayerBridge.setSubtitleDelayMs(it, delayMs) }
+        pendingSubtitleDelayMs = delayMs
+        handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.setSubtitleDelayMs(it, delayMs) }
     }
 
     override fun applySubtitleStyle(style: SubtitleStyleState) {
-        val current = handle.takeIf { it != 0L } ?: return
+        pendingSubtitleStyle = style
+        val current = handles.current().takeIf { it != 0L } ?: return
+        applySubtitleStyle(current, style)
+    }
+
+    private fun applySubtitleStyle(current: Long, style: SubtitleStyleState) {
         NativePlayerBridge.applySubtitleStyle(
             handle = current,
             textColor = style.textColor.toMpvColorString(),
@@ -383,4 +446,42 @@ private class LinuxComposePlayerController : PlayerEngineController {
             subPos = style.toMpvSubtitlePosition(),
         )
     }
+}
+
+internal data class LinuxPlayerOpenRequest(
+    val generation: Long,
+    val previousHandle: Long,
+)
+
+internal class LinuxPlayerHandleState {
+    private var generation = 0L
+
+    @Volatile
+    private var handle = 0L
+
+    @Synchronized
+    fun beginOpen(): LinuxPlayerOpenRequest {
+        generation += 1
+        val previous = handle
+        handle = 0L
+        return LinuxPlayerOpenRequest(generation, previous)
+    }
+
+    @Synchronized
+    fun install(requestGeneration: Long, createdHandle: Long): Boolean {
+        check(createdHandle != 0L)
+        if (requestGeneration != generation) return false
+        handle = createdHandle
+        return true
+    }
+
+    @Synchronized
+    fun clear(): Long {
+        generation += 1
+        val previous = handle
+        handle = 0L
+        return previous
+    }
+
+    fun current(): Long = handle
 }

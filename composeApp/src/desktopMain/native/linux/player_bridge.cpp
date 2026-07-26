@@ -16,8 +16,10 @@
 #include <mpv/client.h>
 #include <mpv/render.h>
 
+#include <algorithm>
 #include <atomic>
 #include <clocale>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -34,6 +36,9 @@ struct PlayerInstance {
     mpv_render_context *renderCtx = nullptr;
     std::thread eventThread;
     std::atomic<bool> running{false};
+    std::atomic<bool> frameUpdateRequested{true};
+    std::mutex errorMutex;
+    std::string pendingError;
 };
 
 // Live-instance registry: a jlong handle is a PlayerInstance*. Every JNI call
@@ -78,6 +83,14 @@ bool getFlag(mpv_handle *mpv, const char *name, bool fallback = false) {
     return out != 0;
 }
 
+int64_t getInt64(mpv_handle *mpv, const char *name, int64_t fallback = 0) {
+    int64_t out = fallback;
+    if (mpv == nullptr || mpv_get_property(mpv, name, MPV_FORMAT_INT64, &out) < 0) {
+        return fallback;
+    }
+    return out;
+}
+
 void setFlag(mpv_handle *mpv, const char *name, bool value) {
     if (mpv == nullptr) return;
     int flag = value ? 1 : 0;
@@ -89,10 +102,31 @@ void setDouble(mpv_handle *mpv, const char *name, double value) {
     mpv_set_property(mpv, name, MPV_FORMAT_DOUBLE, &value);
 }
 
-void command(mpv_handle *mpv, std::vector<const char *> args) {
-    if (mpv == nullptr) return;
+int command(mpv_handle *mpv, std::vector<const char *> args) {
+    if (mpv == nullptr) return MPV_ERROR_UNINITIALIZED;
     args.push_back(nullptr);
-    mpv_command(mpv, args.data());
+    return mpv_command(mpv, args.data());
+}
+
+void setPlayerError(PlayerInstance *player, const std::string &message) {
+    if (player == nullptr || message.empty()) return;
+    std::lock_guard<std::mutex> lock(player->errorMutex);
+    player->pendingError = message;
+}
+
+std::string consumePlayerError(PlayerInstance *player) {
+    if (player == nullptr) return std::string();
+    std::lock_guard<std::mutex> lock(player->errorMutex);
+    std::string result = player->pendingError;
+    player->pendingError.clear();
+    return result;
+}
+
+void requestRenderUpdate(void *context) {
+    auto *player = static_cast<PlayerInstance *>(context);
+    if (player != nullptr) {
+        player->frameUpdateRequested.store(true, std::memory_order_release);
+    }
 }
 
 // ---- track-list (audio/subtitle) JSON ------------------------------------
@@ -205,6 +239,30 @@ std::string buildTracksJson(mpv_handle *mpv, const char *wantType) {
     return out;
 }
 
+void removeExternalSubtitleTracks(mpv_handle *mpv) {
+    if (mpv == nullptr) return;
+    mpv_node node;
+    std::vector<int64_t> externalTrackIds;
+    if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) >= 0) {
+        if (node.format == MPV_FORMAT_NODE_ARRAY) {
+            const mpv_node_list *tracks = node.u.list;
+            for (int i = 0; i < tracks->num; ++i) {
+                const mpv_node *track = &tracks->values[i];
+                if (track->format != MPV_FORMAT_NODE_MAP) continue;
+                if (nodeString(nodeMapGet(track, "type")) != "sub") continue;
+                if (!nodeFlag(nodeMapGet(track, "external"))) continue;
+                const int64_t id = nodeInt(nodeMapGet(track, "id"));
+                if (id >= 0) externalTrackIds.push_back(id);
+            }
+        }
+        mpv_free_node_contents(&node);
+    }
+    for (auto id : externalTrackIds) {
+        const std::string idText = std::to_string(id);
+        command(mpv, {"sub-remove", idText.c_str()});
+    }
+}
+
 // Drains the mpv event queue so the core stays responsive.
 void runEventLoop(PlayerInstance *player) {
     while (player->running.load()) {
@@ -224,6 +282,12 @@ void runEventLoop(PlayerInstance *player) {
                 auto *ef = static_cast<mpv_event_end_file *>(event->data);
                 std::fprintf(stderr, "[nuvio-player] end-file reason=%d error=%s\n",
                              ef->reason, mpv_error_string(ef->error));
+                if (ef->reason == MPV_END_FILE_REASON_ERROR || ef->error < 0) {
+                    setPlayerError(
+                        player,
+                        std::string("Playback failed: ") + mpv_error_string(ef->error)
+                    );
+                }
                 break;
             }
             default:
@@ -330,13 +394,24 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     };
     if (mpv_render_context_create(&player->renderCtx, mpv, swParams) < 0) {
         std::fprintf(stderr, "[nuvio-player] SW render context create failed\n");
-        player->renderCtx = nullptr;
+        mpv_terminate_destroy(mpv);
+        delete player;
+        return 0;
+    }
+    mpv_render_context_set_update_callback(player->renderCtx, requestRenderUpdate, player);
+
+    const int loadResult = command(mpv, {"loadfile", url.c_str(), "replace"});
+    if (loadResult < 0) {
+        std::fprintf(stderr, "[nuvio-player] loadfile failed: %s\n", mpv_error_string(loadResult));
+        mpv_render_context_set_update_callback(player->renderCtx, nullptr, nullptr);
+        mpv_render_context_free(player->renderCtx);
+        mpv_terminate_destroy(mpv);
+        delete player;
+        return 0;
     }
 
     player->running.store(true);
     player->eventThread = std::thread(runEventLoop, player);
-
-    command(mpv, {"loadfile", url.c_str(), "replace"});
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -366,6 +441,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_dispose(JNIEnv *, 
         player->eventThread.join();
     }
     if (player->renderCtx != nullptr) {
+        mpv_render_context_set_update_callback(player->renderCtx, nullptr, nullptr);
         mpv_render_context_free(player->renderCtx);
         player->renderCtx = nullptr;
     }
@@ -393,6 +469,9 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_renderFrame(
     if (player == nullptr || player->renderCtx == nullptr) {
         return JNI_FALSE;
     }
+    if (!player->frameUpdateRequested.exchange(false, std::memory_order_acq_rel)) {
+        return JNI_FALSE;
+    }
     int size[2] = {static_cast<int>(width), static_cast<int>(height)};
     size_t stride = static_cast<size_t>(width) * 4;
     char swFormat[] = "rgba"; // bytes R,G,B,A -> Skia ColorType.RGBA_8888
@@ -403,7 +482,12 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_renderFrame(
         {MPV_RENDER_PARAM_SW_POINTER, dst},
         {MPV_RENDER_PARAM_INVALID, nullptr},
     };
-    return mpv_render_context_render(player->renderCtx, params) >= 0 ? JNI_TRUE : JNI_FALSE;
+    const int result = mpv_render_context_render(player->renderCtx, params);
+    if (result < 0) {
+        setPlayerError(player, std::string("Video render failed: ") + mpv_error_string(result));
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
 }
 
 // ---- transport ------------------------------------------------------------
@@ -506,7 +590,21 @@ JNIEXPORT jlong JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_bufferedPositionMs(JNIEnv *, jobject, jlong handle) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto *player = liveLocked(handle);
-    return player == nullptr ? 0 : static_cast<jlong>(getDouble(player->mpv, "demuxer-cache-time", 0.0) * 1000.0);
+    if (player == nullptr) return 0;
+    const double position = std::max(getDouble(player->mpv, "time-pos", 0.0), 0.0);
+    const double cacheTime = getDouble(player->mpv, "demuxer-cache-time", 0.0);
+    double cacheAhead = 0.0;
+    if (std::isfinite(cacheTime) && cacheTime > 0.0) {
+        cacheAhead = cacheTime >= position - 5.0
+            ? std::max(cacheTime - position, 0.0)
+            : cacheTime;
+    } else {
+        const double cacheDuration = getDouble(player->mpv, "demuxer-cache-duration", 0.0);
+        if (std::isfinite(cacheDuration) && cacheDuration > 0.0) {
+            cacheAhead = cacheDuration;
+        }
+    }
+    return static_cast<jlong>((position + cacheAhead) * 1000.0);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -514,8 +612,26 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_isLoading(JNIEnv *
     std::lock_guard<std::mutex> lock(g_mutex);
     auto *player = liveLocked(handle);
     if (player == nullptr) return JNI_TRUE;
-    const bool loading = getFlag(player->mpv, "paused-for-cache", false) || getFlag(player->mpv, "seeking", false);
+    const bool paused = getFlag(player->mpv, "pause", false);
+    const bool ended = getFlag(player->mpv, "eof-reached", false);
+    const bool idle = getFlag(player->mpv, "core-idle", true);
+    const bool fileReady =
+        getDouble(player->mpv, "duration", 0.0) > 0.0 ||
+        getInt64(player->mpv, "track-list/count", 0) > 0;
+    const bool loading =
+        !fileReady ||
+        (idle && !paused && !ended) ||
+        getFlag(player->mpv, "paused-for-cache", false) ||
+        getFlag(player->mpv, "seeking", false);
     return loading ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_consumeError(JNIEnv *env, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto *player = liveLocked(handle);
+    const std::string message = consumePlayerError(player);
+    return message.empty() ? nullptr : env->NewStringUTF(message.c_str());
 }
 
 JNIEXPORT jboolean JNICALL
@@ -587,7 +703,9 @@ JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_clearExternalSubtitles(JNIEnv *, jobject, jlong handle) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto *player = liveLocked(handle);
-    if (player != nullptr) mpv_set_property_string(player->mpv, "sid", "no");
+    if (player == nullptr) return;
+    mpv_set_property_string(player->mpv, "sid", "no");
+    removeExternalSubtitleTracks(player->mpv);
 }
 
 JNIEXPORT void JNICALL
@@ -595,6 +713,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_clearExternalSubti
     std::lock_guard<std::mutex> lock(g_mutex);
     auto *player = liveLocked(handle);
     if (player == nullptr) return;
+    removeExternalSubtitleTracks(player->mpv);
     mpv_set_property_string(player->mpv, "sid", trackId < 0 ? "no" : std::to_string(trackId).c_str());
 }
 

@@ -8,6 +8,36 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.21-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (134 commits) through official **`0.1.14-alpha`
+  (`5227689c`)**. This brings in the modern navigation and player-overlay work,
+  sortable shelf/grid library layouts, progressive stream results, improved forced-subtitle
+  selection, and the official desktop launch, exit, fullscreen-flash, and shutdown fixes.
+- Preserved the Linux Compose/libmpv renderer, AppImage packaging, dedicated QuickJS
+  dispatcher, search-request deduplication, and fork-specific Trakt and Premiumize OAuth
+  configuration.
+
+### Fixed
+- **Linux playback now survives rapid source changes and disposal races.** Native handles
+  are generation-owned, stale creates are rejected and disposed, and playback, resize,
+  speed, subtitle delay, and subtitle style choices are applied after asynchronous startup.
+- **Native player failures now reach the UI.** Bridge creation and `loadfile` failures are
+  rejected, end-of-file and software-render errors are surfaced, and external subtitle
+  tracks are removed instead of merely hidden.
+- **Playback controls remain responsive during software rendering.** Frame rendering and
+  full-frame copies run away from the Compose dispatcher, with mpv update callbacks
+  preventing redundant renders.
+- **Linux loading and buffering state now matches the other desktop players**, including
+  cache-ahead calculation and idle/file-readiness handling.
+- **Desktop sleep inhibition now works on Linux** through `systemd-inhibit` while playback
+  requests keep-awake behavior.
+- **Restored Linux fullscreen state stays synchronized** with the app fullscreen controller.
+- **AppImage backend validation uses the same runtime configuration as generated builds**
+  and requires both a valid Supabase HTTPS URL and anon key, while retaining the legacy
+  unprefixed local-property names as a compatibility fallback.
+
 ## [0.1.20-alpha] — Linux
 
 ### Upstream sync

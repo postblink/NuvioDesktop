@@ -411,14 +411,18 @@ abstract class CheckBackendConfiguredTask : DefaultTask() {
     @get:Input
     abstract val supabaseUrl: Property<String>
 
+    @get:Input
+    abstract val supabaseAnonKey: Property<String>
+
     @TaskAction
     fun check() {
         val url = supabaseUrl.get()
-        if (!url.startsWith("https://")) {
+        val anonKey = supabaseAnonKey.get()
+        if (!url.startsWith("https://") || anonKey.isBlank()) {
             error(
-                "Refusing to package: SUPABASE_URL is blank/invalid (\"$url\"). " +
+                "Refusing to package: the Supabase runtime configuration is blank or invalid. " +
                     "Account login would resolve to https://localhost and fail with 'Connection refused'. " +
-                    "Set SUPABASE_URL and SUPABASE_ANON_KEY in local.properties " +
+                    "Set NUVIO_SUPABASE_URL and NUVIO_SUPABASE_ANON_KEY in local.properties " +
                     "(published for third-party clients at https://nuvio.tv/docs), then rebuild.",
             )
         }
@@ -567,6 +571,17 @@ fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
         else -> default
     }
 
+// Keep generation and packaging validation on one resolved value. The unprefixed
+// names remain a compatibility fallback for older local release environments.
+val configuredSupabaseUrl = runtimeConfigValue(
+    "NUVIO_SUPABASE_URL",
+    runtimeConfigValue("SUPABASE_URL"),
+)
+val configuredSupabaseAnonKey = runtimeConfigValue(
+    "NUVIO_SUPABASE_ANON_KEY",
+    runtimeConfigValue("SUPABASE_ANON_KEY"),
+)
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     localPropertiesFile.set(rootProject.layout.projectDirectory.file("local.properties"))
@@ -574,8 +589,8 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     appVersionCode.set(releaseAppVersionCode)
     desktopAppVersionName.set(desktopReleaseVersionName)
     desktopAppVersionCode.set(desktopReleaseVersionCode)
-    supabaseUrl.set(runtimeConfigValue("NUVIO_SUPABASE_URL"))
-    supabaseAnonKey.set(runtimeConfigValue("NUVIO_SUPABASE_ANON_KEY"))
+    supabaseUrl.set(configuredSupabaseUrl)
+    supabaseAnonKey.set(configuredSupabaseAnonKey)
     supabaseFallbackUrl.set(runtimeConfigValue("NUVIO_SUPABASE_FALLBACK_URL"))
     sentryDsn.set(runtimeConfigValue("SENTRY_DSN"))
     sentryEnvironment.set(
@@ -786,7 +801,8 @@ val packageLinuxAppImage = tasks.register<Exec>("packageLinuxAppImage") {
 // so it's unaffected. Published credentials live at https://nuvio.tv/docs ->
 // the gitignored local.properties.
 val checkBackendConfigured = tasks.register<CheckBackendConfiguredTask>("checkBackendConfigured") {
-    supabaseUrl.set(runtimeConfigValue("SUPABASE_URL"))
+    supabaseUrl.set(configuredSupabaseUrl)
+    supabaseAnonKey.set(configuredSupabaseAnonKey)
 }
 tasks.matching {
     it.name == "createDistributable" || it.name == "createReleaseDistributable"

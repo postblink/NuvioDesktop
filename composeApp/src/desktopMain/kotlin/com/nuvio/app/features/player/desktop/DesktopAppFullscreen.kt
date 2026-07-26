@@ -112,6 +112,9 @@ internal class DesktopAppFullscreenController {
                 .takeUnless { it == WindowPlacement.Fullscreen }
                 ?: WindowPlacement.Floating
             windowState.placement = WindowPlacement.Fullscreen
+            if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                composeFullscreenActive = true
+            }
         }
     }
 

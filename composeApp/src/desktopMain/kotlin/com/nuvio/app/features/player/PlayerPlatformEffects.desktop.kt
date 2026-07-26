@@ -40,6 +40,7 @@ actual fun rememberPlayerGestureController(): PlayerGestureController? = null
 
 private class DesktopKeepAwakeController : AutoCloseable {
     private var caffeinateProcess: Process? = null
+    private var linuxInhibitProcess: Process? = null
     private var windowsDisplaySleepInhibited = false
 
     fun setEnabled(enabled: Boolean) {
@@ -53,7 +54,8 @@ private class DesktopKeepAwakeController : AutoCloseable {
             }
 
             DesktopHostOs.WINDOWS -> setWindowsDisplaySleepInhibited(enabled)
-            DesktopHostOs.LINUX, DesktopHostOs.UNKNOWN -> Unit
+            DesktopHostOs.LINUX -> setLinuxSleepInhibited(enabled)
+            DesktopHostOs.UNKNOWN -> Unit
         }
     }
 
@@ -79,6 +81,31 @@ private class DesktopKeepAwakeController : AutoCloseable {
         caffeinateProcess = null
     }
 
+    private fun setLinuxSleepInhibited(inhibited: Boolean) {
+        if (!inhibited) {
+            linuxInhibitProcess
+                ?.takeIf(Process::isAlive)
+                ?.destroy()
+            linuxInhibitProcess = null
+            return
+        }
+        if (linuxInhibitProcess?.isAlive == true) return
+        linuxInhibitProcess = runCatching {
+            ProcessBuilder(
+                "systemd-inhibit",
+                "--what=idle:sleep",
+                "--who=Nuvio",
+                "--why=Media playback is active",
+                "--mode=block",
+                "sleep",
+                "infinity",
+            )
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start()
+        }.getOrNull()
+    }
+
     private fun setWindowsDisplaySleepInhibited(inhibited: Boolean) {
         if (windowsDisplaySleepInhibited == inhibited) return
 
@@ -92,6 +119,7 @@ private class DesktopKeepAwakeController : AutoCloseable {
 
     override fun close() {
         stopCaffeinate()
+        setLinuxSleepInhibited(false)
         setWindowsDisplaySleepInhibited(false)
     }
 }
