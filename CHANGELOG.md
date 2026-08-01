@@ -8,6 +8,20 @@ Each **Upstream sync** entry states the upstream ref being tracked as of that me
 either their latest version tag, or (when `Dev` has moved past their last tag) that tag
 plus the commit count/SHA on top, e.g. `0.1.11-alpha + 25 commits (6ff150fd)`.
 
+## [0.1.22-alpha] — Linux
+
+### Upstream sync
+- Merged `upstream/Dev` (84 files changed) — fully caught up, **0 behind** official
+  `Dev`. This brings in library sync improvements, home screen scroll/startup fixes,
+  Device Session Registration, and Windows-specific bundling and CI updates (harmless
+  on Linux).
+- Preserved the Linux Compose/libmpv renderer, AppImage packaging, dedicated QuickJS
+  dispatcher, search-request deduplication, and fork-specific Trakt and Premiumize OAuth
+  configuration.
+
+### Build
+- AppImage built from commit `83bb8c1b` (merge of upstream/Dev into linux).
+
 ## [0.1.21-alpha] — Linux
 
 ### Upstream sync
