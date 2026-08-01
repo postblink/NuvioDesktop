@@ -31,8 +31,6 @@ tools
 AGENTS.md
 server
 
-composeApp/src/desktopMain/resources/torrserver/windows-amd64/TorrServer.exe
-
 PERFORMANCE_FINDINGS.md
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)
