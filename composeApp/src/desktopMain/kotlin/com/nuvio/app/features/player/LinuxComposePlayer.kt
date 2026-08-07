@@ -225,6 +225,8 @@ private class LinuxComposePlayerController : PlayerEngineController {
     private var pendingSubtitleDelayMs = 0
     @Volatile
     private var pendingSubtitleStyle: SubtitleStyleState? = null
+    @Volatile
+    private var pendingUseLibass: Boolean = false
 
     fun beginOpen(playWhenReady: Boolean): LinuxPlayerOpenRequest {
         desiredPlayWhenReady = playWhenReady
@@ -261,7 +263,7 @@ private class LinuxComposePlayerController : PlayerEngineController {
         applyResizeMode(created, pendingResizeMode)
         NativePlayerBridge.setSpeed(created, desiredPlaybackSpeed)
         NativePlayerBridge.setSubtitleDelayMs(created, pendingSubtitleDelayMs)
-        pendingSubtitleStyle?.let { applySubtitleStyle(created, it) }
+        pendingSubtitleStyle?.let { applySubtitleStyle(created, it, pendingUseLibass) }
         return true
     }
 
@@ -428,13 +430,14 @@ private class LinuxComposePlayerController : PlayerEngineController {
         handles.current().takeIf { it != 0L }?.let { NativePlayerBridge.setSubtitleDelayMs(it, delayMs) }
     }
 
-    override fun applySubtitleStyle(style: SubtitleStyleState) {
+    override fun applySubtitleStyle(style: SubtitleStyleState, useLibass: Boolean) {
         pendingSubtitleStyle = style
+        pendingUseLibass = useLibass
         val current = handles.current().takeIf { it != 0L } ?: return
-        applySubtitleStyle(current, style)
+        applySubtitleStyle(current, style, useLibass)
     }
 
-    private fun applySubtitleStyle(current: Long, style: SubtitleStyleState) {
+    private fun applySubtitleStyle(current: Long, style: SubtitleStyleState, useLibass: Boolean) {
         NativePlayerBridge.applySubtitleStyle(
             handle = current,
             textColor = style.textColor.toMpvColorString(),
@@ -444,6 +447,7 @@ private class LinuxComposePlayerController : PlayerEngineController {
             bold = style.bold,
             fontSize = style.toMpvSubtitleFontSize(),
             subPos = style.toMpvSubtitlePosition(),
+            useLibass = useLibass,
         )
     }
 }
