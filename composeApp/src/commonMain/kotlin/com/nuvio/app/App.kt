@@ -106,8 +106,6 @@ import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.ProfileSettingsSync
-import com.nuvio.app.core.sync.RealtimeSyncConfig
-import com.nuvio.app.core.sync.RealtimeSyncInvalidationService
 import com.nuvio.app.core.sync.SyncManager
 import com.nuvio.app.core.ui.LocalNuvioNavBarScrollState
 import com.nuvio.app.core.ui.NuvioNavigationBar
@@ -121,6 +119,7 @@ import com.nuvio.app.core.ui.NuvioPosterZoomActionOverlay
 import com.nuvio.app.core.ui.PosterZoomAnchor
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
+import com.nuvio.app.core.ui.PosterZoomOverlayExitAnimation
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.nuvio.app.core.ui.NuvioStatusModal
@@ -131,7 +130,7 @@ import com.nuvio.app.core.ui.NuvioToastHost
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.NuvioFloatingPrompt
 import com.nuvio.app.core.ui.ProfileMeshBackground
-import com.nuvio.app.core.ui.TraktListPickerDialog
+import com.nuvio.app.core.ui.TrackingListPickerDialog
 import com.nuvio.app.core.ui.NuvioTheme
 import com.nuvio.app.core.ui.NuvioTokens
 import com.nuvio.app.core.ui.LocalNuvioBottomNavigationOverlayPadding
@@ -177,6 +176,10 @@ import com.nuvio.app.features.library.LibraryRepository
 import com.nuvio.app.features.library.LibrarySection
 import com.nuvio.app.features.library.LibrarySortOption
 import com.nuvio.app.features.library.LibrarySourceMode
+import com.nuvio.app.features.library.PendingTrackingMembershipRemoval
+import com.nuvio.app.features.library.TrackingMembershipRemovalConfirmationHost
+import com.nuvio.app.features.library.executeTrackingMembershipOperation
+import com.nuvio.app.features.library.showTrackingMembershipRewriteFeedback
 import com.nuvio.app.features.library.LibraryScreen
 import com.nuvio.app.features.library.toLibraryItem
 import com.nuvio.app.features.library.toMetaPreview
@@ -215,6 +218,7 @@ import com.nuvio.app.features.settings.ContinueWatchingSettingsScreen
 import com.nuvio.app.features.settings.AddonsSettingsScreen
 import com.nuvio.app.features.settings.PluginsSettingsScreen
 import com.nuvio.app.features.settings.AccountSettingsScreen
+import com.nuvio.app.features.settings.AppBrandWordmark
 import com.nuvio.app.features.settings.DesktopNavigationLayout
 import com.nuvio.app.features.settings.SupportersContributorsSettingsScreen
 import com.nuvio.app.features.settings.LicensesAttributionsSettingsScreen
@@ -242,9 +246,15 @@ import com.nuvio.app.features.streams.StreamsScreen
 import com.nuvio.app.features.tmdb.TmdbService
 import com.nuvio.app.features.player.PlayerSettingsRepository
 import com.nuvio.app.features.trakt.TraktAuthRepository
-import com.nuvio.app.features.trakt.TraktListTab
-import com.nuvio.app.features.trakt.TraktScrobbleRepository
 import com.nuvio.app.features.trakt.TraktSettingsRepository
+import com.nuvio.app.features.tracking.TrackingScrobbleAction
+import com.nuvio.app.features.tracking.TrackingScrobbleCoordinator
+import com.nuvio.app.features.tracking.TrackingScrobbleEvent
+import com.nuvio.app.features.tracking.buildTrackingMediaReference
+import com.nuvio.app.features.tracking.TrackingLibraryTab
+import com.nuvio.app.features.tracking.TrackingMembershipApplyResult
+import com.nuvio.app.features.tracking.TrackingProviderId
+import com.nuvio.app.features.tracking.toggleTrackingLibraryMembership
 import com.nuvio.app.features.updater.AppUpdaterHost
 import com.nuvio.app.features.updater.AppUpdaterPlatform
 import com.nuvio.app.features.updater.rememberAppUpdaterController
@@ -271,7 +281,6 @@ import kotlinx.serialization.modules.polymorphic
 import kotlinx.serialization.modules.subclass
 import com.nuvio.app.navigation.*
 import nuvio.composeapp.generated.resources.*
-import nuvio.composeapp.generated.resources.app_logo_wordmark
 import nuvio.composeapp.generated.resources.compose_catalog_subtitle_library
 import nuvio.composeapp.generated.resources.compose_catalog_subtitle_trakt_library
 import nuvio.composeapp.generated.resources.compose_nav_home
@@ -499,6 +508,11 @@ fun App(
             .memoryCachePolicy(CachePolicy.ENABLED)
             .components {
                 add(SvgDecoder.Factory())
+                add(
+                    coil3.network.ktor3.KtorNetworkFetcherFactory(
+                        cacheStrategy = { coil3.network.cachecontrol.CacheControlCacheStrategy() },
+                    )
+                )
             }
             .configurePlatformImageLoader()
             .build()
@@ -900,12 +914,20 @@ private fun MainAppContent(
         var showLibraryListPicker by remember { mutableStateOf(false) }
         var pickerItem by remember { mutableStateOf<LibraryItem?>(null) }
         var pickerTitle by remember { mutableStateOf("") }
-        var pickerTabs by remember { mutableStateOf<List<TraktListTab>>(emptyList()) }
+        var pickerTabs by remember { mutableStateOf<List<TrackingLibraryTab>>(emptyList()) }
         var pickerMembership by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
         var pickerPending by remember { mutableStateOf(false) }
         var pickerError by remember { mutableStateOf<String?>(null) }
-        val addonsUiState by AddonRepository.uiState.collectAsStateWithLifecycle()
-        val libraryUiState by LibraryRepository.uiState.collectAsStateWithLifecycle()
+        var pendingTrackingRemoval by remember { mutableStateOf<PendingTrackingMembershipRemoval?>(null) }
+        val trackingListsUpdateFailedMessage = stringResource(Res.string.tracking_lists_update_failed)
+        val addonsUiState by remember {
+            AddonRepository.initialize()
+            AddonRepository.uiState
+        }.collectAsStateWithLifecycle()
+        val libraryUiState by remember {
+            LibraryRepository.ensureLoaded()
+            LibraryRepository.uiState
+        }.collectAsStateWithLifecycle()
         val authState by AuthRepository.state.collectAsStateWithLifecycle()
         val openPosterActions: (PosterActionTarget) -> Unit = { target ->
             hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -968,7 +990,7 @@ private fun MainAppContent(
     val collectionsTitle = stringResource(Res.string.collections_header)
     val newCollectionTitle = stringResource(Res.string.collections_new)
     val detailsFallbackTitle = stringResource(Res.string.meta_section_details_title)
-    val isTraktLibrarySource = libraryUiState.sourceMode == LibrarySourceMode.TRAKT
+    val isRemoteLibrarySource = libraryUiState.sourceMode != LibrarySourceMode.LOCAL
     var initialHomeReady by rememberSaveable(ownsAppRuntime) {
         mutableStateOf(!ownsAppRuntime)
     }
@@ -1254,38 +1276,6 @@ private fun MainAppContent(
         }
     }
 
-    LaunchedEffect(authState, profileState.activeProfile?.profileIndex) {
-        if (!ownsAppRuntime) return@LaunchedEffect
-        if (!RealtimeSyncConfig.ENABLED) {
-            RealtimeSyncInvalidationService.stop()
-            return@LaunchedEffect
-        }
-
-        val authenticatedState = authState as? AuthState.Authenticated ?: return@LaunchedEffect
-        if (authenticatedState.isAnonymous) return@LaunchedEffect
-
-        val activeProfileId = profileState.activeProfile?.profileIndex ?: return@LaunchedEffect
-        RealtimeSyncInvalidationService.start(
-            userId = authenticatedState.userId,
-            profileId = activeProfileId,
-        )
-    }
-
-    DisposableEffect(authState, profileState.activeProfile?.profileIndex) {
-        val authenticatedState = authState as? AuthState.Authenticated
-        if (ownsAppRuntime && (
-            !RealtimeSyncConfig.ENABLED ||
-            authenticatedState == null ||
-            authenticatedState.isAnonymous ||
-            profileState.activeProfile == null
-        )) {
-            RealtimeSyncInvalidationService.stop()
-        }
-        onDispose {
-            if (ownsAppRuntime) RealtimeSyncInvalidationService.stop()
-        }
-    }
-
     DisposableEffect(authState, profileState.activeProfile?.profileIndex) {
         val authenticatedState = authState as? AuthState.Authenticated
         val activeProfileId = profileState.activeProfile?.profileIndex
@@ -1323,8 +1313,8 @@ private fun MainAppContent(
                     null
                 }
                 val playerLaunch = lastExternalPlayerLaunch
-                if (TraktAuthRepository.isAuthenticated.value && progressPercent != null && playerLaunch != null) {
-                    val scrobbleItem = TraktScrobbleRepository.buildItem(
+                if (progressPercent != null && playerLaunch != null) {
+                    val trackingMedia = buildTrackingMediaReference(
                         contentType = playerLaunch.parentMetaType,
                         parentMetaId = playerLaunch.parentMetaId,
                         videoId = playerLaunch.videoId,
@@ -1333,12 +1323,15 @@ private fun MainAppContent(
                         episodeNumber = playerLaunch.episodeNumber,
                         episodeTitle = playerLaunch.episodeTitle,
                     )
-                    if (scrobbleItem != null) {
+                    if (trackingMedia.hasResolvableIdentity) {
                         runCatching {
-                            TraktScrobbleRepository.scrobbleStop(
+                            TrackingScrobbleCoordinator.scrobble(
                                 profileId = playerLaunch.profileId,
-                                item = scrobbleItem,
-                                progressPercent = progressPercent,
+                                action = TrackingScrobbleAction.STOP,
+                                event = TrackingScrobbleEvent(
+                                    media = trackingMedia,
+                                    progressPercent = progressPercent.toDouble(),
+                                ),
                             )
                         }
                     }
@@ -1768,10 +1761,10 @@ private fun MainAppContent(
             )
         }
 
-        val librarySectionSubtitle = if (libraryUiState.sourceMode == LibrarySourceMode.TRAKT) {
-            stringResource(Res.string.compose_catalog_subtitle_trakt_library)
-        } else {
-            stringResource(Res.string.compose_catalog_subtitle_library)
+        val librarySectionSubtitle = when (libraryUiState.sourceMode) {
+            LibrarySourceMode.LOCAL -> stringResource(Res.string.compose_catalog_subtitle_library)
+            LibrarySourceMode.TRAKT -> stringResource(Res.string.compose_catalog_subtitle_trakt_library)
+            LibrarySourceMode.SIMKL -> stringResource(Res.string.compose_catalog_subtitle_simkl_library)
         }
 
         val onLibrarySectionViewAllClick: (LibrarySection, LibrarySortOption) -> Unit = { section, sortOption ->
@@ -3405,10 +3398,8 @@ private fun MainAppContent(
                         watchedKeys = watchedUiState.watchedKeys,
                         item = preview,
                     )
-                    // Trakt items long-pressed outside the library open the list picker
-                    // instead of removing, so only true removals disintegrate.
                     val removesFromLibrary = isSaved &&
-                        (posterActionTarget.libraryItem != null || !isTraktLibrarySource)
+                        (posterActionTarget.libraryItem != null || !isRemoteLibrarySource)
                     NuvioPosterZoomActionOverlay(
                         imageUrl = selectedPosterAnchor?.imageUrl ?: preview.poster,
                         title = preview.name,
@@ -3429,39 +3420,70 @@ private fun MainAppContent(
                                     stringResource(Res.string.hero_add_to_library)
                                 },
                                 isDestructive = removesFromLibrary,
+                                exitAnimation = if (removesFromLibrary && !isRemoteLibrarySource) {
+                                    PosterZoomOverlayExitAnimation.DISINTEGRATE
+                                } else {
+                                    PosterZoomOverlayExitAnimation.COLLAPSE
+                                },
                                 onSelected = {
                                     val libraryItem = posterActionTarget.libraryItem
                                         ?: preview.toLibraryItem(savedAtEpochMs = 0L)
                                     if (posterActionTarget.libraryItem != null) {
-                                        if (isTraktLibrarySource) {
+                                        if (isRemoteLibrarySource) {
                                             coroutineScope.launch {
-                                                runCatching {
-                                                    val listKey = posterActionTarget.libraryListKey
+                                                val listKey = posterActionTarget.libraryListKey
+                                                val removeMembership: suspend (Set<TrackingProviderId>) ->
+                                                    TrackingMembershipApplyResult = { confirmedProviders ->
                                                     if (listKey.isNullOrBlank()) {
                                                         val currentMembership = LibraryRepository.getMembershipSnapshot(libraryItem)
                                                         LibraryRepository.applyMembershipChanges(
                                                             item = libraryItem,
                                                             desiredMembership = currentMembership.mapValues { false },
+                                                            confirmedRemovalProviders = confirmedProviders,
                                                         )
                                                     } else {
-                                                        LibraryRepository.removeFromList(libraryItem, listKey)
+                                                        LibraryRepository.removeFromList(
+                                                            item = libraryItem,
+                                                            listKey = listKey,
+                                                            confirmedRemovalProviders = confirmedProviders,
+                                                        )
                                                     }
-                                                }.onFailure { error ->
-                                                    NuvioToastController.show(
-                                                        error.message ?: getString(Res.string.trakt_lists_update_failed),
-                                                    )
                                                 }
+                                                executeTrackingMembershipOperation(
+                                                    operation = { removeMembership(emptySet()) },
+                                                    onSuccess = { result ->
+                                                        if (result.requiresRemovalConfirmation) {
+                                                            pendingTrackingRemoval = PendingTrackingMembershipRemoval(
+                                                                itemTitle = libraryItem.name,
+                                                                confirmations = result.requiredRemovalConfirmations,
+                                                                retry = removeMembership,
+                                                                onApplied = {},
+                                                                onFailure = { error ->
+                                                                    NuvioToastController.show(
+                                                                        error.message
+                                                                            ?: trackingListsUpdateFailedMessage,
+                                                                    )
+                                                                },
+                                                            )
+                                                        }
+                                                    },
+                                                    onFailure = { error ->
+                                                        NuvioToastController.show(
+                                                            error.message ?: trackingListsUpdateFailedMessage,
+                                                        )
+                                                    },
+                                                )
                                             }
                                         } else {
                                             LibraryRepository.remove(libraryItem.id)
                                         }
                                     } else {
-                                        if (!isTraktLibrarySource) {
-                                            LibraryRepository.toggleSaved(libraryItem)
+                                        if (!isRemoteLibrarySource) {
+                                            LibraryRepository.toggleLocalSaved(libraryItem)
                                         } else {
                                             pickerItem = libraryItem
                                             pickerTitle = preview.name
-                                            pickerTabs = LibraryRepository.libraryListTabs()
+                                            pickerTabs = LibraryRepository.libraryListTabs(libraryItem)
                                             pickerMembership = pickerTabs.associate { it.key to false }
                                             pickerPending = true
                                             pickerError = null
@@ -3469,7 +3491,7 @@ private fun MainAppContent(
                                             coroutineScope.launch {
                                                 runCatching {
                                                     val snapshot = LibraryRepository.getMembershipSnapshot(libraryItem)
-                                                    val tabs = LibraryRepository.libraryListTabs()
+                                                    val tabs = LibraryRepository.libraryListTabs(libraryItem)
                                                     pickerTabs = tabs
                                                     pickerMembership = tabs.associate { tab ->
                                                         tab.key to (snapshot[tab.key] == true)
@@ -3598,7 +3620,7 @@ private fun MainAppContent(
                 },
             )
 
-            TraktListPickerDialog(
+            TrackingListPickerDialog(
                 visible = showLibraryListPicker,
                 title = pickerTitle,
                 tabs = pickerTabs,
@@ -3606,9 +3628,11 @@ private fun MainAppContent(
                 isPending = pickerPending,
                 errorMessage = pickerError,
                 onToggle = { listKey ->
-                    pickerMembership = pickerMembership.toMutableMap().apply {
-                        this[listKey] = !(this[listKey] == true)
-                    }
+                    pickerMembership = toggleTrackingLibraryMembership(
+                        tabs = pickerTabs,
+                        membership = pickerMembership,
+                        key = listKey,
+                    )
                 },
                 onDismiss = {
                     if (!pickerPending) {
@@ -3618,25 +3642,54 @@ private fun MainAppContent(
                     }
                 },
                 onSave = {
-                    val item = pickerItem ?: return@TraktListPickerDialog
+                    val item = pickerItem ?: return@TrackingListPickerDialog
                     coroutineScope.launch {
                         pickerPending = true
                         pickerError = null
-                        runCatching {
+                        val desiredMembership = pickerMembership.toMap()
+                        val applyMembership: suspend (Set<TrackingProviderId>) ->
+                            TrackingMembershipApplyResult = { confirmedProviders ->
                             LibraryRepository.applyMembershipChanges(
                                 item = item,
-                                desiredMembership = pickerMembership,
+                                desiredMembership = desiredMembership,
+                                confirmedRemovalProviders = confirmedProviders,
                             )
-                        }.onSuccess {
+                        }
+                        val completeMembershipUpdate: suspend (TrackingMembershipApplyResult) -> Unit = { result ->
+                            showTrackingMembershipRewriteFeedback(result)
                             showLibraryListPicker = false
                             pickerItem = null
                             pickerError = null
-                        }.onFailure { error ->
-                            pickerError = error.message ?: getString(Res.string.trakt_lists_update_failed)
                         }
+                        executeTrackingMembershipOperation(
+                            operation = { applyMembership(emptySet()) },
+                            onSuccess = { result ->
+                                if (result.requiresRemovalConfirmation) {
+                                    pendingTrackingRemoval = PendingTrackingMembershipRemoval(
+                                        itemTitle = item.name,
+                                        confirmations = result.requiredRemovalConfirmations,
+                                        retry = applyMembership,
+                                        onApplied = completeMembershipUpdate,
+                                        onFailure = { error ->
+                                            pickerError = error.message ?: trackingListsUpdateFailedMessage
+                                        },
+                                    )
+                                } else {
+                                    completeMembershipUpdate(result)
+                                }
+                            },
+                            onFailure = { error ->
+                                pickerError = error.message ?: trackingListsUpdateFailedMessage
+                            },
+                        )
                         pickerPending = false
                     }
                 },
+            )
+
+            TrackingMembershipRemovalConfirmationHost(
+                pending = pendingTrackingRemoval,
+                onPendingChange = { pendingTrackingRemoval = it },
             )
 
             NuvioStatusModal(
@@ -4397,13 +4450,11 @@ private fun AppLaunchOverlay(
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Image(
-                painter = painterResource(Res.drawable.app_logo_wordmark),
+            AppBrandWordmark(
                 contentDescription = stringResource(Res.string.app_brand_name),
                 modifier = Modifier
                     .fillMaxWidth(0.48f)
                     .height(44.dp),
-                contentScale = ContentScale.Fit,
             )
             Spacer(modifier = Modifier.height(tokens.spacing.sectionGap))
             NuvioLoadingIndicator(color = tokens.colors.accent)

@@ -31,7 +31,7 @@ import com.nuvio.app.features.tmdb.TmdbSettingsRepository
 import com.nuvio.app.features.trakt.TraktCommentsStorage
 import com.nuvio.app.features.trakt.TraktCommentsSettings
 import com.nuvio.app.features.trakt.TraktSettingsStorage
-import com.nuvio.app.features.trakt.TraktSettingsRepository
+import com.nuvio.app.features.tracking.TrackingSettingsRepository
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesStorage
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
 import io.github.jan.supabase.postgrest.postgrest
@@ -60,7 +60,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
-private const val PUSH_DEBOUNCE_MS = 1500L
+private const val PUSH_DEBOUNCE_MS = 500L
 
 object ProfileSettingsSync {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -88,6 +88,7 @@ object ProfileSettingsSync {
     fun startObserving() {
         if (observeJob?.isActive == true) return
         ensureRepositoriesLoaded()
+        ProviderCredentialSync.startObserving()
         observeLocalChangesAndPush()
     }
 
@@ -95,6 +96,7 @@ object ProfileSettingsSync {
         observeJob?.cancel()
         observeJob = null
         skipNextPushSignature = null
+        ProviderCredentialSync.clearAccountState()
     }
 
     suspend fun pull(profileId: Int): Boolean {
@@ -177,6 +179,7 @@ object ProfileSettingsSync {
             ThemeSettingsRepository.selectedTheme.map { "theme" },
             ThemeSettingsRepository.amoledEnabled.map { "amoled" },
             ThemeSettingsRepository.liquidGlassNativeTabBarEnabled.map { "liquid_glass_tab_bar" },
+            ThemeSettingsRepository.desktopNavigationLayout.map { "desktop_navigation_layout" },
             ThemeSettingsRepository.navBarStyle.map { "nav_bar_style" },
             PosterCardStyleRepository.uiState.map { "poster_card_style" },
             CardDepthStyleRepository.uiState.map { "card_depth_style" },
@@ -188,7 +191,7 @@ object ProfileSettingsSync {
             MetaScreenSettingsRepository.uiState.map { "meta" },
             CollectionMobileSettingsRepository.uiState.map { "collection_mobile_settings" },
             ContinueWatchingPreferencesRepository.uiState.map { "continue_watching" },
-            TraktSettingsRepository.uiState.map { "trakt_settings" },
+            TrackingSettingsRepository.uiState.map { "trakt_settings" },
             TraktCommentsSettings.enabled.map { "trakt_comments" },
             EpisodeReleaseNotificationsRepository.uiState.map { "episode_release_alerts" },
         )
@@ -229,11 +232,23 @@ object ProfileSettingsSync {
                 themeSettings = ThemeSettingsStorage.exportToSyncPayload(),
                 posterCardStyleSettingsPayload = PosterCardStyleStorage.loadPayload().orEmpty().trim(),
                 cardDepthStyleSettingsPayload = CardDepthStyleStorage.loadPayload().orEmpty().trim(),
-                playerSettings = PlayerSettingsStorage.exportToSyncPayload(),
+                playerSettings = withoutProfileCredentials(
+                    PROFILE_PLAYER_SETTINGS_FEATURE,
+                    PlayerSettingsStorage.exportToSyncPayload(),
+                ),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
-                debridSettings = DebridSettingsStorage.exportToSyncPayload(),
-                tmdbSettings = TmdbSettingsStorage.exportToSyncPayload(),
-                mdbListSettings = MdbListSettingsStorage.exportToSyncPayload(),
+                debridSettings = withoutProfileCredentials(
+                    PROFILE_DEBRID_SETTINGS_FEATURE,
+                    DebridSettingsStorage.exportToSyncPayload(),
+                ),
+                tmdbSettings = withoutProfileCredentials(
+                    PROFILE_TMDB_SETTINGS_FEATURE,
+                    TmdbSettingsStorage.exportToSyncPayload(),
+                ),
+                mdbListSettings = withoutProfileCredentials(
+                    PROFILE_MDBLIST_SETTINGS_FEATURE,
+                    MdbListSettingsStorage.exportToSyncPayload(),
+                ),
                 metaScreenSettingsPayload = MetaScreenSettingsStorage.loadPayload().orEmpty().trim(),
                 collectionMobileSettingsPayload = CollectionMobileSettingsStorage.loadPayload().orEmpty().trim(),
                 continueWatchingSettingsPayload = ContinueWatchingPreferencesStorage.loadPayload().orEmpty().trim(),
@@ -256,19 +271,46 @@ object ProfileSettingsSync {
         CardDepthStyleStorage.savePayload(blob.features.cardDepthStyleSettingsPayload)
         CardDepthStyleRepository.onProfileChanged()
 
-        PlayerSettingsStorage.replaceFromSyncPayload(blob.features.playerSettings)
+        val localPlayerSettings = PlayerSettingsStorage.exportToSyncPayload()
+        val localIntroDbApiKey = PlayerSettingsStorage.loadIntroDbApiKey()
+        PlayerSettingsStorage.replaceFromSyncPayload(
+            preservingLocalProfileCredentials(
+                PROFILE_PLAYER_SETTINGS_FEATURE,
+                blob.features.playerSettings,
+                localPlayerSettings,
+            ),
+        )
+        localIntroDbApiKey?.let(PlayerSettingsStorage::saveIntroDbApiKey)
         PlayerSettingsRepository.onProfileChanged()
 
         StreamBadgeSettingsStorage.replaceFromSyncPayload(blob.features.streamBadgeSettings)
         StreamBadgeSettingsRepository.onProfileChanged()
 
-        DebridSettingsStorage.replaceFromSyncPayload(blob.features.debridSettings)
+        DebridSettingsStorage.replaceFromSyncPayload(
+            preservingLocalProfileCredentials(
+                PROFILE_DEBRID_SETTINGS_FEATURE,
+                blob.features.debridSettings,
+                DebridSettingsStorage.exportToSyncPayload(),
+            ),
+        )
         DebridSettingsRepository.onProfileChanged()
 
-        TmdbSettingsStorage.replaceFromSyncPayload(blob.features.tmdbSettings)
+        TmdbSettingsStorage.replaceFromSyncPayload(
+            preservingLocalProfileCredentials(
+                PROFILE_TMDB_SETTINGS_FEATURE,
+                blob.features.tmdbSettings,
+                TmdbSettingsStorage.exportToSyncPayload(),
+            ),
+        )
         TmdbSettingsRepository.onProfileChanged()
 
-        MdbListSettingsStorage.replaceFromSyncPayload(blob.features.mdbListSettings)
+        MdbListSettingsStorage.replaceFromSyncPayload(
+            preservingLocalProfileCredentials(
+                PROFILE_MDBLIST_SETTINGS_FEATURE,
+                blob.features.mdbListSettings,
+                MdbListSettingsStorage.exportToSyncPayload(),
+            ),
+        )
         MdbListMetadataService.clearCache()
         MdbListSettingsRepository.onProfileChanged()
 
@@ -282,7 +324,7 @@ object ProfileSettingsSync {
         ContinueWatchingPreferencesRepository.onProfileChanged()
 
         TraktSettingsStorage.savePayload(blob.features.traktSettingsPayload)
-        TraktSettingsRepository.onProfileChanged()
+        TrackingSettingsRepository.onProfileChanged()
 
         TraktCommentsStorage.replaceFromSyncPayload(blob.features.traktCommentsSettings)
         TraktCommentsSettings.onProfileChanged()
@@ -302,7 +344,7 @@ object ProfileSettingsSync {
         MetaScreenSettingsRepository.ensureLoaded()
         CollectionMobileSettingsRepository.ensureLoaded()
         ContinueWatchingPreferencesRepository.ensureLoaded()
-        TraktSettingsRepository.ensureLoaded()
+        TrackingSettingsRepository.ensureLoaded()
         TraktCommentsSettings.ensureLoaded()
         EpisodeReleaseNotificationsRepository.ensureLoaded()
     }
@@ -314,6 +356,7 @@ object ProfileSettingsSync {
         "theme=${ThemeSettingsRepository.selectedTheme.value.name}",
         "amoled=${ThemeSettingsRepository.amoledEnabled.value}",
         "liquid_glass_tab_bar=${ThemeSettingsRepository.liquidGlassNativeTabBarEnabled.value}",
+        "desktop_navigation_layout=${ThemeSettingsRepository.desktopNavigationLayout.value.name}",
         "nav_bar_style=${ThemeSettingsRepository.navBarStyle.value.key}",
         "poster_card_style=${PosterCardStyleRepository.uiState.value}",
         "card_depth_style=${CardDepthStyleRepository.uiState.value}",
@@ -325,7 +368,7 @@ object ProfileSettingsSync {
         "meta=${MetaScreenSettingsRepository.uiState.value}",
         "collection_mobile_settings=${CollectionMobileSettingsRepository.uiState.value}",
         "continue=${ContinueWatchingPreferencesRepository.uiState.value}",
-        "trakt_settings=${TraktSettingsRepository.uiState.value}",
+        "trakt_settings=${TrackingSettingsRepository.uiState.value}",
         "trakt_comments=${TraktCommentsSettings.enabled.value}",
         "episode_release_alerts=${EpisodeReleaseNotificationsRepository.uiState.value.isEnabled}",
     ).joinToString(separator = "||")
