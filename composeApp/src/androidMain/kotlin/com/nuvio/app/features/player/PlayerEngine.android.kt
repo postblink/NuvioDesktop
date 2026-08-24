@@ -78,7 +78,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 
 private const val TAG = "NuvioPlayer"
@@ -114,6 +116,7 @@ actual fun PlatformPlayerSurface(
     onControllerReady: (PlayerEngineController) -> Unit,
     onSnapshot: (PlayerPlaybackSnapshot) -> Unit,
     onError: (String?) -> Unit,
+    sourceAvailable: Boolean,
 ) {
     val playerSettings = remember {
         PlayerSettingsRepository.ensureLoaded()
@@ -264,6 +267,7 @@ private fun ExoPlayerSurface(
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
     var videoAspectRatio by remember(playerSourceKey) { mutableStateOf(0f) }
     val latestVideoAspectRatio = rememberUpdatedState(videoAspectRatio)
+    var currentSubtitleStyle by remember { mutableStateOf(SubtitleStyleState.DEFAULT) }
     var decoderPriorityOverride by remember(playerSourceKey) { mutableStateOf<Int?>(null) }
     var fallbackStartPositionMs by remember(playerSourceKey) { mutableStateOf<Long?>(null) }
     val effectiveDecoderPriority = decoderPriorityOverride ?: playerSettings.decoderPriority
@@ -352,6 +356,7 @@ private fun ExoPlayerSurface(
             shouldNormalizeCuePositionProvider = {
                 latestExternalSubtitleMimeType.value == MimeTypes.TEXT_VTT
             },
+            shouldStripSdhProvider = { currentSubtitleStyle.stripSdh },
             videoBoundsFractionProvider = {
                 playerViewRef?.videoBoundsFraction(latestVideoAspectRatio.value)
             },
@@ -462,7 +467,6 @@ private fun ExoPlayerSurface(
 
     val pendingSubtitleTrackIndex = remember { mutableListOf<Int>() }
     val pendingAudioTrackSelection = remember { mutableListOf<TrackSelectionSnapshot>() }
-    var currentSubtitleStyle by remember { mutableStateOf(SubtitleStyleState.DEFAULT) }
     var subtitleSelectionJob by remember { mutableStateOf<Job?>(null) }
     val isInPip = rememberIsInPictureInPicture()
     val pipSubtitleScale by rememberUpdatedState(if (isInPip) 0.4f else 1.0f)
@@ -916,6 +920,7 @@ private fun LibmpvPlayerSurface(
     onError: (String?) -> Unit,
 ) {
     val context = LocalContext.current
+    val isLocalFileSource = sourceUrl.startsWith("file:", ignoreCase = true)
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestOnSnapshot = rememberUpdatedState(onSnapshot)
     val latestOnError = rememberUpdatedState(onError)
@@ -1154,8 +1159,8 @@ private fun LibmpvPlayerSurface(
         factory = { viewContext ->
             NuvioLibmpvView(
                 context = viewContext,
-                videoOutput = videoOutput,
-                hardwareDecodingEnabled = hardwareDecodingEnabled,
+                videoOutput = if (isLocalFileSource) AndroidLibmpvVideoOutput.Gpu else videoOutput,
+                hardwareDecodingEnabled = if (isLocalFileSource) false else hardwareDecodingEnabled,
                 yuv420pEnabled = yuv420pEnabled,
             ).apply {
                 layoutParams = android.view.ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
@@ -1265,9 +1270,9 @@ private class NuvioLibmpvView(
         val sourceUrl = currentSourceUrl ?: return
         applyRequestHeaders(currentRequestHeaders)
         setPaused(!playWhenReady)
-        mpv.command("loadfile", sourceUrl, "replace")
+        mpv.command("loadfile", sourceUrl.toMpvSource(), "replace")
         currentSourceAudioUrl?.takeIf { it.isNotBlank() }?.let { sourceAudioUrl ->
-            mpv.command("audio-add", sourceAudioUrl, "auto")
+            mpv.command("audio-add", sourceAudioUrl.toMpvSource(), "auto")
         }
         currentExternalSubtitles.forEachIndexed { index, subtitle ->
             val flag = if (index == 0) "auto" else "cached"
@@ -1275,6 +1280,13 @@ private class NuvioLibmpvView(
         }
         setPaused(!playWhenReady)
     }
+
+    private fun String.toMpvSource(): String =
+        if (!startsWith("file:", ignoreCase = true)) {
+            this
+        } else {
+            runCatching { File(URI(this)).absolutePath }.getOrDefault(this)
+        }
 
     fun setPaused(paused: Boolean) {
         runCatching { mpv.setPropertyBoolean("pause", paused) }
@@ -1449,6 +1461,8 @@ private class NuvioLibmpvView(
                     mpv.setPropertyInt("sub-border-size", style.toMpvSubtitleOutlineSize())
                     mpv.setPropertyInt("sub-pos", (100 - style.bottomOffset / 10).coerceIn(0, 100))
                 }
+                mpv.setPropertyBoolean("sub-filter-sdh", style.stripSdh)
+                mpv.setPropertyBoolean("sub-filter-sdh-harder", style.stripSdh)
             }
 
             override fun setSubtitleDelayMs(delayMs: Int) {
@@ -1918,6 +1932,7 @@ private class SubtitleOffsetRenderersFactory(
     context: Context,
     private val subtitleDelayUsProvider: () -> Long,
     private val shouldNormalizeCuePositionProvider: () -> Boolean,
+    private val shouldStripSdhProvider: () -> Boolean,
     private val videoBoundsFractionProvider: () -> RectF?,
 ) : DefaultRenderersFactory(context) {
     override fun buildTextRenderers(
@@ -1930,6 +1945,7 @@ private class SubtitleOffsetRenderersFactory(
         val normalizingOutput = CueNormalizingTextOutput(
             delegate = output,
             shouldNormalizeCuePositionProvider = shouldNormalizeCuePositionProvider,
+            shouldStripSdhProvider = shouldStripSdhProvider,
             videoBoundsFractionProvider = videoBoundsFractionProvider,
         )
         val startIndex = out.size
@@ -1946,20 +1962,28 @@ private class SubtitleOffsetRenderersFactory(
 private class CueNormalizingTextOutput(
     private val delegate: TextOutput,
     private val shouldNormalizeCuePositionProvider: () -> Boolean,
+    private val shouldStripSdhProvider: () -> Boolean,
     private val videoBoundsFractionProvider: () -> RectF?,
 ) : TextOutput {
     override fun onCues(cueGroup: CueGroup) {
-        val processed = cueGroup.cues.map(::processCue)
+        val processed = cueGroup.cues.mapNotNull(::processCue)
         delegate.onCues(CueGroup(processed, cueGroup.presentationTimeUs))
     }
 
     @Deprecated("Uses the deprecated Media3 callback for text outputs.")
     override fun onCues(cues: List<Cue>) {
-        delegate.onCues(cues.map(::processCue))
+        delegate.onCues(cues.mapNotNull(::processCue))
     }
 
-    private fun processCue(cue: Cue): Cue {
+    private fun processCue(cue: Cue): Cue? {
         var processed = fixRtlCueText(cue)
+        if (shouldStripSdhProvider()) {
+            val text = processed.text?.toString() ?: return processed
+            val filtered = SubtitleSdhFilter.filter(text) ?: return null
+            if (filtered != text) {
+                processed = processed.buildUpon().setText(filtered).build()
+            }
+        }
         if (shouldNormalizeCuePositionProvider()) {
             processed = normalizeCuePosition(processed)
         }

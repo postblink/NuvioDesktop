@@ -19,16 +19,18 @@
 </div>
 
 > [!NOTE]
-> **Unofficial Linux port.** This fork adds a native Linux build of Nuvio Desktop while
-> aiming to stay as faithful as possible to the official upstream branch. It tracks
-> [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop) and is intended as a
-> stopgap until an official Linux release lands, at which point this port defers to it.
+> **Unofficial Linux AppImage build.** Upstream now ships its own native Linux desktop
+> support, and as of the 2026-08-24 sync this fork **defers to it** — the upstream libmpv +
+> WebKitGTK player bridge replaced this port's own bridge. What remains fork-specific is
+> AppImage packaging, a fork-owned Trakt/Premiumize OAuth app, and a backend-configuration
+> guardrail. This fork tracks
+> [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop).
 >
 > 📥 **Download the latest Linux AppImage:** [postblink/NuvioDesktop releases](https://github.com/postblink/NuvioDesktop/releases) — newest build is at the top.
 
-## ⚠️ Alpha Software — Testers Only
+## ⚠️ Alpha Software - Slow Development - Testers Only
 
-Nuvio Desktop is currently in alpha and is intended only for testers. It is under active development and is not suitable for daily use.
+Nuvio Desktop is currently in alpha and is intended only for testers. It is under development and is not suitable for daily use.
 
 Expect breaking changes with every update. Features, settings, stored data, and compatibility may change or stop working without notice. Do not rely on this build as your primary media app, and report any issues you encounter during testing.
 

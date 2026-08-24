@@ -51,7 +51,7 @@ private object MacosAwtViewResolver {
         (findMethod(target.javaClass, methodName).invoke(target) as Number).toLong()
 }
 
-private object WindowsAwtViewResolver {
+private object LinuxAwtViewResolver {
     private val componentPeerField: Field by lazy {
         Component::class.java.getDeclaredField("peer").apply { isAccessible = true }
     }
@@ -60,9 +60,11 @@ private object WindowsAwtViewResolver {
         val peer = componentPeerField.get(component)
             ?: error("AWT component peer is not ready for native playback.")
 
-        val pointer = invokeLong(peer, "getHWnd")
+        // XAWT peers extend sun.awt.X11.XBaseWindow, whose getWindow()
+        // returns the native X11 window XID we hand to mpv as "wid".
+        val pointer = invokeLong(peer, "getWindow")
         if (pointer == 0L) {
-            error("Windows AWT HWND pointer was zero.")
+            error("Linux AWT X11 window XID was zero.")
         }
         return pointer
     }
@@ -82,7 +84,7 @@ private object WindowsAwtViewResolver {
         (findMethod(target.javaClass, methodName).invoke(target) as Number).toLong()
 }
 
-private object LinuxAwtViewResolver {
+private object WindowsAwtViewResolver {
     private val componentPeerField: Field by lazy {
         Component::class.java.getDeclaredField("peer").apply { isAccessible = true }
     }
@@ -91,13 +93,9 @@ private object LinuxAwtViewResolver {
         val peer = componentPeerField.get(component)
             ?: error("AWT component peer is not ready for native playback.")
 
-        // On the OpenJDK X11 backend the component peer (XCanvasPeer ->
-        // XComponentPeer -> XBaseWindow) exposes the native X11 window id via
-        // getWindow(). This is the XID mpv embeds into through its "wid" option.
-        // Requires --add-opens java.desktop/sun.awt.X11=ALL-UNNAMED to reflect.
-        val pointer = invokeLong(peer, "getWindow")
+        val pointer = invokeLong(peer, "getHWnd")
         if (pointer == 0L) {
-            error("Linux AWT X11 window id was zero.")
+            error("Windows AWT HWND pointer was zero.")
         }
         return pointer
     }

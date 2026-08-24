@@ -23,6 +23,8 @@ logs/
 hs_err_pid*.log
 analysis/
 Docs
+SUPPORTER_COSMETICS.md
+supabase/migrations/
 keystore/
 scripts/build-distribution.sh
 asset

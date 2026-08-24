@@ -32,10 +32,7 @@ internal class NativePlayerHost : Canvas() {
 
     init {
         background = Color.BLACK
-        // On Linux, mpv renders into this Canvas's X11 window via GLX. Letting AWT
-        // auto-repaint (black-fill) over the mpv surface causes black artifacting,
-        // so suppress AWT repaints there. Other platforms keep the default.
-        ignoreRepaint = DesktopHostOs.current == DesktopHostOs.LINUX
+        ignoreRepaint = false
         addMouseMotionListener(object : MouseMotionAdapter() {
             override fun mouseMoved(event: MouseEvent) {
                 noteCursorActivity()
@@ -45,19 +42,35 @@ internal class NativePlayerHost : Canvas() {
                 noteCursorActivity()
             }
         })
-        // On Linux/X11 a heavyweight Canvas inside a Compose SwingPanel may not
-        // receive paint() callbacks reliably, which would stall the first-paint
-        // gating that triggers native player attach. Resize/show events are
-        // reliable across platforms, so drive the same notifications from them.
-        addComponentListener(object : ComponentAdapter() {
-            override fun componentResized(event: ComponentEvent) {
-                notifyPaintProgress()
-            }
+        // On Linux/XWayland a heavyweight Canvas embedded in a Compose SwingPanel is not
+        // guaranteed an expose-driven paint() when it is first laid out, so the paint()-based
+        // first-full-size-paint signal (which unlocks the native attach) can never fire and
+        // playback silently never starts. componentResized fires reliably on layout, so use it
+        // to drive the same signal. Linux-only to keep macOS/Windows behaviour byte-identical.
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            addComponentListener(object : ComponentAdapter() {
+                override fun componentResized(event: ComponentEvent) {
+                    repaint()
+                    notifyFirstPaints()
+                }
 
-            override fun componentShown(event: ComponentEvent) {
-                notifyPaintProgress()
-            }
-        })
+                override fun componentShown(event: ComponentEvent) {
+                    repaint()
+                    notifyFirstPaints()
+                }
+            })
+        }
+    }
+
+    private fun notifyFirstPaints() {
+        if (!firstPaintNotified) {
+            firstPaintNotified = true
+            onFirstPaint?.invoke()
+        }
+        if (!firstFullSizePaintNotified && width > 1 && height > 1) {
+            firstFullSizePaintNotified = true
+            onFirstFullSizePaint?.invoke()
+        }
     }
 
     fun setControlsVisible(visible: Boolean) {
@@ -87,18 +100,7 @@ internal class NativePlayerHost : Canvas() {
     override fun paint(graphics: Graphics) {
         graphics.color = Color.BLACK
         graphics.fillRect(0, 0, width, height)
-        notifyPaintProgress()
-    }
-
-    private fun notifyPaintProgress() {
-        if (!firstPaintNotified) {
-            firstPaintNotified = true
-            onFirstPaint?.invoke()
-        }
-        if (!firstFullSizePaintNotified && width > 1 && height > 1) {
-            firstFullSizePaintNotified = true
-            onFirstFullSizePaint?.invoke()
-        }
+        notifyFirstPaints()
     }
 
     override fun addNotify() {
