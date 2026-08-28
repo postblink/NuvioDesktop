@@ -18,15 +18,40 @@
 
 </div>
 
-> [!NOTE]
-> **Unofficial Linux AppImage build.** Upstream now ships its own native Linux desktop
-> support, and as of the 2026-08-24 sync this fork **defers to it** — the upstream libmpv +
-> WebKitGTK player bridge replaced this port's own bridge. What remains fork-specific is
-> AppImage packaging, a fork-owned Trakt/Premiumize OAuth app, and a backend-configuration
-> guardrail. This fork tracks
-> [NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop).
+> [!IMPORTANT]
+> ## 🗄️ This fork is retired — use the official Nuvio Desktop release
 >
-> 📥 **Download the latest Linux AppImage:** [postblink/NuvioDesktop releases](https://github.com/postblink/NuvioDesktop/releases) — newest build is at the top.
+> **➡️ [Download Nuvio Desktop from NuvioMedia/NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop/releases/latest)**
+>
+> This was an unofficial Linux port, created when Nuvio Desktop had no Linux build. **Nuvio
+> now ships official Linux packages**, so this fork has no remaining purpose and is no longer
+> maintained.
+>
+> The official release is strictly better than anything here: it provides **AppImage (with
+> zsync delta updates), DEB, RPM, and Flatpak** packages plus published checksums, where this
+> fork only ever built a plain AppImage.
+>
+> ### ⚠️ Do not compare version numbers
+>
+> This fork reached `0.1.24-alpha` using its own numbering, which is **unrelated to
+> upstream's**. A higher number here does **not** mean newer or better — the official build
+> is ahead in every respect. Always get releases from the upstream repository linked above.
+>
+> ### If you are running this fork's AppImage
+>
+> Install the official build and delete the old AppImage. Your library, watch progress, and
+> settings live in your Nuvio account and profile data, not in the AppImage, so signing in to
+> the official build restores them. You may need to reconnect Trakt, since this fork
+> authenticated against its own Trakt application.
+>
+> ### What became of the code
+>
+> Upstream's own Linux player bridge superseded this port's, and it was removed in
+> `0.1.24-alpha`. The one fix unique to this fork — isolating the QuickJS plugin runtime to
+> stop it deadlocking the UI — was submitted upstream as
+> [NuvioMedia/NuvioDesktop#513](https://github.com/NuvioMedia/NuvioDesktop/pull/513).
+>
+> The repository stays online read-only so existing download links keep working.
 
 ## ⚠️ Alpha Software - Slow Development - Testers Only
 
@@ -56,14 +81,16 @@ Release packages are provided for supported desktop platforms:
 ## Trakt
 
 > [!NOTE]
-> **This unofficial Linux fork uses its own, fork-specific Trakt OAuth application** —
-> not the official Nuvio one. The official desktop builds bake in NuvioMedia's private
-> Trakt OAuth credentials, which aren't published, so we don't have access to the official
-> OAuth implementation as it stands. **Until an official Linux desktop app launches**, this
-> fork registers a separate Trakt app so Trakt syncing (scrobbling, watched/collection
-> sync) still works. Functionality is identical — only the registered OAuth application
-> differs — and when an official Linux build ships, this fork will defer to the official
-> Trakt integration.
+> **Superseded.** This fork used its own Trakt OAuth application because NuvioMedia's
+> credentials aren't published and there was no official Linux build. There now is one, so
+> **use the official release's Trakt integration instead** — that was always the plan for
+> this stopgap.
+>
+> If you previously connected Trakt through this fork, you authorized *its* Trakt
+> application, not Nuvio's. Reconnect Trakt after moving to the official build, and revoke
+> the old authorization at
+> [trakt.tv/settings/applications](https://trakt.tv/settings/applications) if you want it
+> gone.
 
 Sign-in uses Trakt's device-code flow: **Settings → Trakt → Connect** opens
 `trakt.tv/activate` in your browser and shows a short code to enter. No callback/redirect
@@ -72,12 +99,9 @@ is involved, so it works the same on Windows, macOS, and Linux.
 ## Premiumize
 
 > [!NOTE]
-> Same situation as Trakt: **this fork uses its own Premiumize OAuth client**, not the
-> official Nuvio one, because NuvioMedia's Premiumize client isn't published. It's a
-> **temporary measure until an official Linux desktop app launches**, after which the fork
-> will defer to the official integration. Premiumize sign-in uses a device-code flow
-> (**Settings → Debrid → Premiumize → Connect** → `premiumize.me/device` + a short code);
-> the fork client uses `client_id` only (no secret).
+> **Superseded**, same as Trakt above: this fork used its own Premiumize OAuth client as a
+> temporary measure until an official Linux build existed. Use the official release's
+> Premiumize integration instead, and reconnect there.
 
 ## Development
 
