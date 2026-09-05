@@ -47,9 +47,9 @@
 > ### What became of the code
 >
 > Upstream's own Linux player bridge superseded this port's, and it was removed in
-> `0.1.24-alpha`. The one fix unique to this fork — isolating the QuickJS plugin runtime to
-> stop it deadlocking the UI — was submitted upstream as
-> [NuvioMedia/NuvioDesktop#513](https://github.com/NuvioMedia/NuvioDesktop/pull/513).
+> `0.1.24-alpha`. The fork's QuickJS plugin-runtime fix turned out to be redundant as well —
+> upstream had already fixed the same freeze in June 2026 by making the plugin fetch
+> binding asynchronous, so nothing from this fork needed upstreaming.
 >
 > The repository stays online read-only so existing download links keep working.
 
