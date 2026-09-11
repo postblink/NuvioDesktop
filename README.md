@@ -20,6 +20,7 @@ If you still use this fork's AppImage:
 3. Sign in to restore your library, watch progress, and settings from your Nuvio account and
    profile data.
 4. Reconnect Trakt if necessary. This fork used its own Trakt OAuth application.
+5. Reconnect Premiumize if you used it. This fork used its own temporary client there as well.
 
 You can revoke this fork's old Trakt authorization from
 [Trakt application settings](https://trakt.tv/settings/applications).
