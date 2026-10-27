@@ -35,9 +35,10 @@ jobs:
 
     steps:
       - name: Check out full history
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Read release metadata
         id: release
@@ -100,6 +101,7 @@ jobs:
           PREVIOUS_BUMP: ${{ steps.release.outputs.previous_bump }}
           CURRENT_BUMP: ${{ steps.release.outputs.current_bump }}
           EXCLUDE_COMMITS: ${{ inputs.exclude_commits }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           ./scripts/generate-release-notes.sh \
             --from "${PREVIOUS_BUMP}" \
@@ -114,21 +116,21 @@ jobs:
           fi
 
           {
-            echo "## ${{ steps.release.outputs.version }} release notes"
+            echo "## ${RELEASE_VERSION} release notes"
             echo
             cat release-notes.md
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Set up Java
         if: inputs.mode != 'dry-run'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Gradle
         if: inputs.mode != 'dry-run'
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0-rc.1
 
       - name: Configure release properties
         if: inputs.mode != 'dry-run'
@@ -161,7 +163,7 @@ jobs:
 
       - name: Upload build artifacts
         if: inputs.mode != 'dry-run'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: nuvio-${{ steps.release.outputs.version }}-full-release
           path: androidApp/build/outputs/apk/full/release/*.apk
